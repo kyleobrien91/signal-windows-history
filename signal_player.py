@@ -720,6 +720,30 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 const $ = id => document.getElementById(id);
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Comprehensive Logging & Diagnostics
+// ─────────────────────────────────────────────────────────────────────────────
+const LOG_TAG = '[SignalPlayer]';
+function log(topic, msg, ...extra) {
+  const ts = new Date().toISOString().substring(11, 23);
+  console.log(`%c${LOG_TAG}[${ts}][${topic}] %c${msg}`, 'color: #3b82f6; font-weight: bold;', 'color: inherit;', ...extra);
+}
+function logWarn(topic, msg, ...extra) {
+  const ts = new Date().toISOString().substring(11, 23);
+  console.warn(`%c${LOG_TAG}[${ts}][${topic}] %c${msg}`, 'color: #f59e0b; font-weight: bold;', 'color: inherit;', ...extra);
+}
+function logErr(topic, msg, ...extra) {
+  const ts = new Date().toISOString().substring(11, 23);
+  console.error(`%c${LOG_TAG}[${ts}][${topic}] %c${msg}`, 'color: #ef4444; font-weight: bold;', 'color: inherit;', ...extra);
+}
+
+window.addEventListener('error', (e) => {
+  logErr('GlobalError', `Uncaught window error: "${e.message}" at ${e.filename}:${e.lineno}:${e.colno}`, e.error);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  logErr('UnhandledRejection', 'Unhandled Promise Rejection:', e.reason);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // State
 // ─────────────────────────────────────────────────────────────────────────────
 let allMedia     = [];    // full list for current group/view
@@ -765,39 +789,80 @@ function fmtDur(s) {
 // Bootstrap
 // ─────────────────────────────────────────────────────────────────────────────
 async function init() {
-  $('group-list').addEventListener('click', (e) => {
-    const item = e.target.closest('.nav-item');
-    if (!item) return;
-    const id = item.dataset.id;
-    const g = groups.find(x => x.id === id);
-    if (g) loadGroup(g.id, g.name);
-  });
+  log('Init', 'Client script started. Initializing event listeners & views...');
 
-  $('label-list').addEventListener('click', (e) => {
-    const item = e.target.closest('.nav-item');
-    if (!item) return;
-    const lbl = item.dataset.label;
-    if (lbl) loadLabel(lbl);
-  });
+  const groupListEl = $('group-list');
+  const labelListEl = $('label-list');
 
+  if (!groupListEl) {
+    logErr('Init', 'Element #group-list not found in DOM!');
+  } else {
+    log('Init', 'Binding click event listener to #group-list container (event delegation)');
+    groupListEl.addEventListener('click', (e) => {
+      log('Click', 'Group-list container click event triggered.', { target: e.target });
+      const item = e.target.closest('.nav-item');
+      if (!item) {
+        logWarn('Click', 'Click was inside #group-list but not within a .nav-item element.');
+        return;
+      }
+      const id = item.dataset.id;
+      log('Click', `Clicked .nav-item found. data-id="${id}"`);
+      const g = groups.find(x => x.id === id);
+      const name = g ? g.name : (item.querySelector('.group-name')?.textContent?.trim() || id);
+      log('Click', `Resolved group: "${name}" (id: ${id}, existsInGroupsArray: ${Boolean(g)}). Invoking loadGroup()...`);
+      loadGroup(id, name);
+    });
+  }
+
+  if (!labelListEl) {
+    logErr('Init', 'Element #label-list not found in DOM!');
+  } else {
+    log('Init', 'Binding click event listener to #label-list container');
+    labelListEl.addEventListener('click', (e) => {
+      log('Click', 'Label-list container click event triggered.', { target: e.target });
+      const item = e.target.closest('.nav-item');
+      if (!item) return;
+      const lbl = item.dataset.label;
+      log('Click', `Clicked label: "${lbl}". Invoking loadLabel()...`);
+      if (lbl) loadLabel(lbl);
+    });
+  }
+
+  log('Init', 'Fetching groups from server: GET /api/groups');
+  const t0 = performance.now();
   try {
     const res = await fetch('/api/groups');
-    groups    = await res.json();
+    const elapsed = (performance.now() - t0).toFixed(1);
+    log('Init', `/api/groups response received in ${elapsed}ms: HTTP ${res.status} ${res.statusText}`);
+    if (!res.ok) {
+      const errTxt = await res.text();
+      logErr('Init', `/api/groups HTTP error ${res.status}: ${errTxt}`);
+      throw new Error(`Server error ${res.status}: ${errTxt}`);
+    }
+    groups = await res.json();
+    log('Init', `Successfully parsed /api/groups. Total groups: ${groups.length}`, groups);
     renderSidebar();
     await refreshLabels();
     await updateNewCount();
     startSyncPolling();
+    log('Init', 'Initialization completed successfully.');
   } catch (err) {
-    console.error('Failed to initialize:', err);
+    const elapsed = (performance.now() - t0).toFixed(1);
+    logErr('Init', `Failed to initialize groups after ${elapsed}ms:`, err);
+    $('empty-msg').innerHTML = `Failed to load groups from server:<br><span style="color:#ef4444;font-size:12px;">${esc(err.message)}</span><br><small style="color:var(--muted)">Check Console (F12) for details</small>`;
   }
 }
 
 let lastPendingCount = -1;
 function startSyncPolling() {
+  log('Sync', 'Starting background sync status polling interval (every 4000ms)...');
   setInterval(async () => {
     try {
       const res = await fetch('/api/sync/status');
-      if (!res.ok) return;
+      if (!res.ok) {
+        logWarn('Sync', `/api/sync/status returned HTTP ${res.status}`);
+        return;
+      }
       const data = await res.json();
       const banner = $('sync-banner');
       if (!banner) return;
@@ -806,9 +871,11 @@ function startSyncPolling() {
         banner.style.display = 'flex';
         const rem = data.pending_count ?? 0;
         $('sync-stats').textContent = `${rem} pending video${rem !== 1 ? 's' : ''}`;
+        log('Sync', `Background download active. ${rem} video(s) pending.`);
 
         // If newly downloaded videos were detected, refresh UI
         if (lastPendingCount !== -1 && rem < lastPendingCount) {
+          log('Sync', `Pending count decreased from ${lastPendingCount} to ${rem}. Refreshing UI...`);
           const gRes = await fetch('/api/groups');
           groups = await gRes.json();
           renderSidebar();
@@ -822,6 +889,7 @@ function startSyncPolling() {
         lastPendingCount = rem;
       } else {
         if (banner.style.display !== 'none') {
+          log('Sync', 'Background sync finished. Hiding banner and refreshing group list.');
           banner.style.display = 'none';
           const gRes = await fetch('/api/groups');
           groups = await gRes.json();
@@ -829,26 +897,42 @@ function startSyncPolling() {
           await updateNewCount();
         }
       }
-    } catch (e) {}
+    } catch (e) {
+      logWarn('Sync', 'Polling /api/sync/status encountered error:', e);
+    }
   }, 4000);
 }
 
 async function updateNewCount() {
   try {
+    log('NewCount', 'Fetching new video count: GET /api/media/new_count');
     const res = await fetch('/api/media/new_count');
+    if (!res.ok) {
+      logWarn('NewCount', `/api/media/new_count returned HTTP ${res.status}`);
+      return;
+    }
     const data = await res.json();
     const count = data.count ?? 0;
+    log('NewCount', `Received count: ${count}`);
     const badge = $('new-count');
     if (badge) {
       badge.textContent = count;
       badge.style.display = count > 0 ? 'inline-block' : 'none';
     }
-  } catch (e) {}
+  } catch (e) {
+    logWarn('NewCount', 'Failed to fetch /api/media/new_count:', e);
+  }
 }
 
 function renderSidebar() {
+  log('Sidebar', `renderSidebar called. Rendering ${groups.length} groups.`);
   const list = $('group-list');
+  if (!list) {
+    logErr('Sidebar', '#group-list element missing in DOM!');
+    return;
+  }
   if (!groups.length) {
+    logWarn('Sidebar', 'groups list is empty.');
     list.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:12px;text-align:center">No downloaded videos</div>';
     return;
   }
@@ -859,38 +943,58 @@ function renderSidebar() {
         <div class="group-count">${g.video_count} video${g.video_count!==1?'s':''} • ${esc(g.type)}</div>
       </div>
     </div>`).join('');
+  log('Sidebar', `Injected ${groups.length} group items into #group-list.`);
 }
 
 async function refreshLabels() {
-  const res    = await fetch('/api/labels');
-  const labels = await res.json();
-  const sec    = $('label-section');
-  const list   = $('label-list');
-  if (!labels.length) { sec.style.display='none'; list.innerHTML=''; return; }
-  sec.style.display = '';
-  list.innerHTML = labels.map(lbl => `
-    <div class="nav-item" data-label="${esc(lbl)}">
-      <span>${chipHtml(lbl,false,true)}</span>
-    </div>`).join('');
+  log('Labels', 'Fetching labels: GET /api/labels');
+  try {
+    const res    = await fetch('/api/labels');
+    const labels = await res.json();
+    log('Labels', `Received ${labels.length} labels:`, labels);
+    const sec    = $('label-section');
+    const list   = $('label-list');
+    if (!labels.length) {
+      if (sec) sec.style.display='none';
+      if (list) list.innerHTML='';
+      return;
+    }
+    if (sec) sec.style.display = '';
+    if (list) {
+      list.innerHTML = labels.map(lbl => `
+        <div class="nav-item" data-label="${esc(lbl)}">
+          <span>${chipHtml(lbl,false,true)}</span>
+        </div>`).join('');
+    }
+  } catch (e) {
+    logWarn('Labels', 'Failed to refresh labels:', e);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // View switching
 // ─────────────────────────────────────────────────────────────────────────────
 function setActiveNav(type, id = null, label = null) {
+  log('Nav', `setActiveNav: type="${type}", id="${id}", label="${label}"`);
   document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
-  $('btn-mark-all').style.display = type === 'new' ? 'inline-block' : 'none';
+  const btnMark = $('btn-mark-all');
+  if (btnMark) btnMark.style.display = type === 'new' ? 'inline-block' : 'none';
+
   if (type === 'new')         $('nav-new')?.classList.add('active');
   else if (type === 'all')    $('nav-all')?.classList.add('active');
   else if (type === 'favourites') $('nav-fav')?.classList.add('active');
   else if (type === 'group' && id) {
-    document.querySelector(`.nav-item[data-id="${CSS.escape(id)}"]`)?.classList.add('active');
+    const el = document.querySelector(`.nav-item[data-id="${CSS.escape(id)}"]`);
+    if (el) el.classList.add('active');
+    else logWarn('Nav', `Could not find sidebar .nav-item with data-id="${id}" to set active.`);
   } else if (type === 'label' && label) {
-    document.querySelector(`.nav-item[data-label="${CSS.escape(label)}"]`)?.classList.add('active');
+    const el = document.querySelector(`.nav-item[data-label="${CSS.escape(label)}"]`);
+    if (el) el.classList.add('active');
   }
 }
 
 async function setView(type) {
+  log('View', `===> setView called with type: "${type}"`);
   currentView = { type };
   setActiveNav(type);
   const titles = {
@@ -901,64 +1005,111 @@ async function setView(type) {
   const title = titles[type] || 'Videos';
   $('group-title').textContent = title;
   showLoading();
+  const url = '/api/media?group=all';
+  log('View', `Sending request: GET ${url}`);
+  const t0 = performance.now();
   try {
-    const res = await fetch('/api/media?group=all');
+    const res = await fetch(url);
+    const elapsed = (performance.now() - t0).toFixed(1);
+    log('View', `Response received in ${elapsed}ms: HTTP ${res.status} ${res.statusText}`);
     if (!res.ok) {
       const err = await res.text();
+      logErr('View', `Server error (${res.status}): ${err}`);
       throw new Error(`Server error ${res.status}: ${err}`);
     }
+    log('View', 'Parsing JSON media items...');
     const items = await res.json();
+    log('View', `Total media items returned: ${items.length}`);
+    let toRender = items;
     if (type === 'new') {
-      renderGrid(items.filter(m => m.is_new), title);
+      toRender = items.filter(m => m.is_new);
+      log('View', `Filtered for view="new": ${toRender.length} items.`);
     } else if (type === 'all') {
-      renderGrid(items, title);
+      log('View', `Showing all ${toRender.length} items.`);
     } else if (type === 'favourites') {
-      renderGrid(items.filter(m => m.favourite), title);
+      toRender = items.filter(m => m.favourite);
+      log('View', `Filtered for view="favourites": ${toRender.length} items.`);
     }
+    renderGrid(toRender, title);
+    log('View', `<=== setView finished rendering for view: "${type}".`);
   } catch (err) {
+    const elapsed = (performance.now() - t0).toFixed(1);
+    logErr('View', `FAILED setView("${type}") after ${elapsed}ms:`, err);
     $('loading').style.display = 'none';
-    $('empty-msg').textContent = 'Error loading videos: ' + err.message;
+    $('empty-msg').innerHTML = `Error loading videos:<br><span style="color:#ef4444;font-size:12px;">${esc(err.message)}</span><br><small style="color:var(--muted)">Check DevTools Console (F12) for detailed logs</small>`;
     $('empty').style.display = 'flex';
   }
 }
 
 async function loadGroup(id, name) {
+  log('Group', `===> loadGroup called: id="${id}", name="${name}"`);
   currentView = { type: 'group', id };
   setActiveNav('group', id);
   $('group-title').textContent = name;
   showLoading();
+  const url = '/api/media?group=' + encodeURIComponent(id);
+  log('Group', `Fetching media items from URL: ${url}`);
+  const t0 = performance.now();
   try {
-    const res   = await fetch('/api/media?group=' + encodeURIComponent(id));
+    const res = await fetch(url);
+    const elapsed = (performance.now() - t0).toFixed(1);
+    log('Group', `Fetch responded in ${elapsed}ms: HTTP ${res.status} ${res.statusText}`, {
+      contentType: res.headers.get('content-type'),
+      status: res.status
+    });
     if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`Server error (${res.status}): ${err}`);
+      const errText = await res.text();
+      logErr('Group', `Server responded with error status ${res.status}: ${errText}`);
+      throw new Error(`Server error (${res.status}): ${errText}`);
     }
+    log('Group', 'Parsing JSON payload...');
+    const parseT0 = performance.now();
     const items = await res.json();
+    const parseElapsed = (performance.now() - parseT0).toFixed(1);
+    log('Group', `JSON parsed successfully in ${parseElapsed}ms. Received ${items.length} media items for "${name}".`, {
+      totalCount: items.length,
+      sampleFirstItem: items[0] ?? null
+    });
     renderGrid(items, name);
+    log('Group', `<=== loadGroup complete for "${name}". Rendered ${items.length} videos.`);
   } catch (err) {
+    const elapsed = (performance.now() - t0).toFixed(1);
+    logErr('Group', `FAILED to load media for group "${name}" (${id}) after ${elapsed}ms:`, err);
     $('loading').style.display = 'none';
-    $('empty-msg').textContent = 'Error loading videos: ' + err.message;
+    $('empty-msg').innerHTML = `Failed to load videos for <b>${esc(name)}</b>:<br><span style="color:#ef4444;font-size:12px;">${esc(err.message)}</span><br><small style="color:var(--muted)">Check DevTools Console (F12) for full trace</small>`;
     $('empty').style.display = 'flex';
   }
 }
 
 async function loadLabel(label) {
+  log('Label', `===> loadLabel called: label="${label}"`);
   currentView = { type: 'label', label };
   setActiveNav('label', null, label);
   const title = `Label: ${label}`;
   $('group-title').textContent = title;
   showLoading();
+  const url = '/api/media?group=all';
+  log('Label', `Fetching media items from URL: ${url}`);
+  const t0 = performance.now();
   try {
-    const res = await fetch('/api/media?group=all');
+    const res = await fetch(url);
+    const elapsed = (performance.now() - t0).toFixed(1);
+    log('Label', `Response received in ${elapsed}ms: HTTP ${res.status} ${res.statusText}`);
     if (!res.ok) {
       const err = await res.text();
+      logErr('Label', `Server error (${res.status}): ${err}`);
       throw new Error(`Server error (${res.status}): ${err}`);
     }
     const items = await res.json();
-    renderGrid(items.filter(m => m.labels && m.labels.includes(label)), title);
+    const matching = items.filter(m => m.labels && m.labels.includes(label));
+    log('Label', `Filtered ${items.length} total items down to ${matching.length} matching label "${label}".`);
+    renderGrid(matching, title);
+    log('Label', `<=== loadLabel complete for "${label}".`);
   } catch (err) {
+    const elapsed = (performance.now() - t0).toFixed(1);
+    logErr('Label', `FAILED to load media for label "${label}" after ${elapsed}ms:`, err);
     $('loading').style.display = 'none';
-    $('empty-msg').textContent = 'Error loading videos: ' + err.message;
+    $('empty-msg').innerHTML = `Error loading videos for label "${esc(label)}":<br><span style="color:#ef4444;font-size:12px;">${esc(err.message)}</span>`;
     $('empty').style.display = 'flex';
   }
 }
@@ -967,12 +1118,14 @@ async function loadLabel(label) {
 // Grid rendering
 // ─────────────────────────────────────────────────────────────────────────────
 function showLoading() {
+  log('Grid', 'showLoading: Clearing grid, hiding empty state, showing spinner.');
   $('grid').innerHTML = '';
   $('empty').style.display = 'none';
   $('loading').style.display = 'flex';
 }
 
 function renderGrid(media, title) {
+  log('Grid', `renderGrid called with ${media.length} items, title="${title}"`);
   allMedia = media;
   $('loading').style.display = 'none';
   $('toolbar-info').textContent = `${media.length} video${media.length!==1?'s':''}`;
@@ -982,6 +1135,7 @@ function renderGrid(media, title) {
 
 function applyFilter() {
   const q = $('search').value.toLowerCase().trim();
+  log('Filter', `applyFilter: Query="${q}", Current allMedia.length=${allMedia.length}`);
   filtered = q
     ? allMedia.filter(m =>
         (m.filename || '').toLowerCase().includes(q) ||
@@ -989,16 +1143,23 @@ function applyFilter() {
         (m.labels   || []).some(l => l.toLowerCase().includes(q))
       )
     : [...allMedia];
+  log('Filter', `applyFilter: Filtered result count=${filtered.length}`);
 
   const grid = $('grid');
+  if (!grid) {
+    logErr('Grid', 'Element #grid not found in DOM!');
+    return;
+  }
 
   if (!filtered.length) {
+    log('Grid', 'No items in filtered array. Displaying #empty state.');
     grid.innerHTML = '';
     $('empty-msg').textContent = q ? `No videos matching "${q}"` : 'No videos here yet';
     $('empty').style.display = 'flex';
     return;
   }
   $('empty').style.display = 'none';
+  log('Grid', `Building and injecting ${filtered.length} card HTML elements into #grid...`);
 
   grid.innerHTML = filtered.map((m, i) => `
     <div class="card${m.favourite?' is-fav':''}" data-index="${i}"
@@ -1022,7 +1183,7 @@ function applyFilter() {
       </div>
     </div>`).join('');
 
-  // Lazy metadata loading via IntersectionObserver
+  log('Grid', 'Setting up IntersectionObserver for cards...');
   const obs = new IntersectionObserver(entries => {
     entries.forEach(entry => {
       if (!entry.isIntersecting) return;
@@ -1040,6 +1201,7 @@ function applyFilter() {
   }, { rootMargin: '120px' });
 
   grid.querySelectorAll('.card').forEach(c => obs.observe(c));
+  log('Grid', `IntersectionObserver observing ${grid.querySelectorAll('.card').length} cards.`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1083,12 +1245,14 @@ function hoverStop(i) {
 // Modal player
 // ─────────────────────────────────────────────────────────────────────────────
 function openModal(i) {
+  log('Modal', `openModal called for index: ${i}`);
   currentIdx = i;
   renderModal();
   $('modal').classList.add('open');
 
   const m = filtered[i];
   if (m && m.is_new) {
+    log('Modal', `Clearing is_new flag for item: ${m.id}`);
     m.is_new = false;
     const am = allMedia.find(x => x.id === m.id);
     if (am) am.is_new = false;
@@ -1096,13 +1260,14 @@ function openModal(i) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: m.id })
-    }).catch(()=>{});
+    }).catch(err => logWarn('Modal', 'Error marking item seen:', err));
     refreshCard(i, m);
     updateNewCount();
   }
 }
 
 function closeModal() {
+  log('Modal', 'closeModal called');
   $('modal').classList.remove('open');
   const v = $('modal-video');
   v.pause(); v.src = '';
@@ -1110,11 +1275,16 @@ function closeModal() {
 
 function renderModal() {
   const m = filtered[currentIdx];
-  if (!m) return;
+  if (!m) {
+    logWarn('Modal', `No item found for currentIdx: ${currentIdx}`);
+    return;
+  }
+  log('Modal', `renderModal for item: id="${m.id}", filename="${m.filename}", sender="${m.sender}"`);
 
   const v = $('modal-video');
   v.src = '/stream/' + encodeURIComponent(m.id);
-  v.load(); v.play().catch(()=>{});
+  v.load();
+  v.play().catch(err => logWarn('Modal', 'Autoplay prevented or failed:', err));
 
   $('modal-info').innerHTML =
     `<strong>${esc(m.filename||'Video')}</strong> &nbsp;*&nbsp; `+
@@ -1129,6 +1299,7 @@ function renderModal() {
 
 function navigate(dir) {
   const n = currentIdx + dir;
+  log('Modal', `navigate: dir=${dir}, from=${currentIdx} to=${n}`);
   if (n < 0 || n >= filtered.length) return;
   currentIdx = n;
   renderModal();
@@ -1162,19 +1333,23 @@ async function toggleFav() {
   const m = filtered[currentIdx];
   if (!m) return;
   const newFav = !m.favourite;
+  log('Fav', `toggleFav: item=${m.id}, setting favourite=${newFav}`);
   m.favourite  = newFav;
-  // Also update in allMedia
   const am = allMedia.find(x => x.id === m.id);
   if (am) am.favourite = newFav;
 
-  await fetch('/api/meta/' + encodeURIComponent(m.id), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ favourite: newFav }),
-  });
+  try {
+    await fetch('/api/meta/' + encodeURIComponent(m.id), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ favourite: newFav }),
+    });
+    log('Fav', `Successfully saved favourite status for item: ${m.id}`);
+  } catch (err) {
+    logErr('Fav', `Failed to save favourite status for item: ${m.id}:`, err);
+  }
 
   renderFavBtn(newFav);
-  // Refresh card in grid (star badge + border)
   refreshCard(currentIdx, m);
 }
 
@@ -1182,6 +1357,7 @@ async function toggleFav() {
 // Label management
 // ─────────────────────────────────────────────────────────────────────────────
 function renderChips(labels) {
+  log('Labels', `renderChips called with ${labels.length} labels:`, labels);
   $('modal-chips').innerHTML = labels.map(l => chipHtml(l, true)).join('');
   $('label-input').value = '';
 }
@@ -1191,13 +1367,19 @@ function handleLabelKey(e) {
   e.preventDefault();
   const val = $('label-input').value.trim();
   if (!val) return;
+  log('Labels', `handleLabelKey submitted label: "${val}"`);
   addLabel(val);
 }
 
 async function addLabel(lbl) {
   const m = filtered[currentIdx];
   if (!m) return;
-  if (m.labels.includes(lbl)) { $('label-input').value=''; return; }
+  if (m.labels.includes(lbl)) {
+    log('Labels', `Label "${lbl}" already present on item ${m.id}`);
+    $('label-input').value = '';
+    return;
+  }
+  log('Labels', `Adding label "${lbl}" to item ${m.id}`);
   m.labels.push(lbl);
   const am = allMedia.find(x => x.id === m.id);
   if (am) am.labels = [...m.labels];
@@ -1211,6 +1393,7 @@ async function addLabel(lbl) {
 async function removeLabel(lbl) {
   const m = filtered[currentIdx];
   if (!m) return;
+  log('Labels', `Removing label "${lbl}" from item ${m.id}`);
   m.labels = m.labels.filter(l => l !== lbl);
   const am = allMedia.find(x => x.id === m.id);
   if (am) am.labels = [...m.labels];
@@ -1222,11 +1405,17 @@ async function removeLabel(lbl) {
 }
 
 async function saveMeta(m) {
-  await fetch('/api/meta/' + encodeURIComponent(m.id), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ favourite: m.favourite, labels: m.labels }),
-  });
+  log('Meta', `Saving metadata for item ${m.id}: fav=${m.favourite}, labels=`, m.labels);
+  try {
+    const res = await fetch('/api/meta/' + encodeURIComponent(m.id), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ favourite: m.favourite, labels: m.labels }),
+    });
+    log('Meta', `saveMeta response: HTTP ${res.status}`);
+  } catch (err) {
+    logErr('Meta', `saveMeta failed for item ${m.id}:`, err);
+  }
 }
 
 // Refresh a grid card's star badge + label chips + fav border without a full re-render
@@ -1262,17 +1451,23 @@ function refreshCard(idx, m) {
 
 async function markAllSeen() {
   const newItems = allMedia.filter(m => m.is_new);
+  log('Seen', `markAllSeen called. Found ${newItems.length} new items to mark.`);
   if (!newItems.length) return;
   const ids = newItems.map(m => m.id);
 
   newItems.forEach(m => { m.is_new = false; });
   filtered.forEach(m => { if (ids.includes(m.id)) m.is_new = false; });
 
-  await fetch('/api/meta/seen', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ids })
-  });
+  try {
+    const res = await fetch('/api/meta/seen', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids })
+    });
+    log('Seen', `markAllSeen POST response: HTTP ${res.status}`);
+  } catch (err) {
+    logErr('Seen', 'markAllSeen POST failed:', err);
+  }
 
   await updateNewCount();
 
@@ -1291,12 +1486,14 @@ document.addEventListener('keydown', e => {
   if (document.activeElement === $('label-input') || document.activeElement === $('search')) return;
 
   if (!$('modal').classList.contains('open')) return;
+  log('Keyboard', `Keydown detected: "${e.key}"`);
   if (e.key === 'Escape')     closeModal();
   if (e.key === 'ArrowRight') navigate(1);
   if (e.key === 'ArrowLeft')  navigate(-1);
   if (e.key === 'f' || e.key === 'F') { e.preventDefault(); toggleFav(); }
 });
 
+log('Init', 'Invoking init() bootstrap function...');
 init();
 </script>
 </body>
@@ -1309,40 +1506,56 @@ init();
 class _Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
-        pass  # Suppress routine access logs
+        sys.stderr.write(f"[HTTP {time.strftime('%H:%M:%S')}] {self.address_string()} - {fmt % args}\n")
+        sys.stderr.flush()
 
     def do_GET(self):
+        t0 = time.time()
         parsed = urlparse(self.path)
         path   = parsed.path
         qs     = parse_qs(parsed.query)
+        print(f"[HTTP] Incoming GET: {self.path}", flush=True)
 
         if path == '/':
             self._html()
         elif path == '/api/groups':
-            self._json(_query_groups())
+            t_q = time.time()
+            groups = _query_groups()
+            print(f"[API] _query_groups completed in {time.time()-t_q:.3f}s, returning {len(groups)} groups", flush=True)
+            self._json(groups)
         elif path == '/api/media':
-            self._serve_media(qs.get('group', [None])[0])
+            group_arg = qs.get('group', [None])[0]
+            print(f"[API] Handling /api/media for group={group_arg}", flush=True)
+            self._serve_media(group_arg)
         elif path == '/api/media/new_count':
-            self._json({"count": _query_new_count()})
+            count = _query_new_count()
+            self._json({"count": count})
         elif path == '/api/labels':
             self._json(_all_labels())
         elif path == '/api/sync/status':
             self._json(_get_sync_status())
         elif path.startswith('/stream/'):
-            self._stream(unquote(path[len('/stream/'):]))
+            media_id = unquote(path[len('/stream/'):])
+            self._stream(media_id)
         else:
+            print(f"[HTTP 404] No route for: {self.path}", flush=True)
             self.send_error(404)
+        print(f"[HTTP] GET {self.path} finished in {time.time()-t0:.3f}s", flush=True)
 
     def do_POST(self):
+        t0 = time.time()
         parsed = urlparse(self.path)
         path   = parsed.path
+        print(f"[HTTP] Incoming POST: {self.path}", flush=True)
 
         if path == '/api/meta/seen':
             self._handle_mark_seen()
         elif path.startswith('/api/meta/'):
             self._update_meta(unquote(path[len('/api/meta/'):]))
         else:
+            print(f"[HTTP 404] No POST route for: {self.path}", flush=True)
             self.send_error(404)
+        print(f"[HTTP] POST {self.path} finished in {time.time()-t0:.3f}s", flush=True)
 
     # ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -1373,12 +1586,20 @@ class _Handler(BaseHTTPRequestHandler):
     def _serve_media(self, group_id):
         if not group_id:
             group_id = 'all'
+        t0 = time.time()
+        print(f"[API] _serve_media starting query for group_id='{group_id}'...", flush=True)
         try:
             media, lookup = _query_media(group_id)
+            elapsed = time.time() - t0
+            print(f"[API] _serve_media query returned {len(media)} items in {elapsed:.3f}s", flush=True)
             with _lookup_lock:
                 _media_lookup.update(lookup)
             self._json(media)
         except Exception as e:
+            elapsed = time.time() - t0
+            print(f"[API ERROR] _serve_media failed after {elapsed:.3f}s: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
             self.send_error(500, str(e))
 
     def _handle_mark_seen(self):
