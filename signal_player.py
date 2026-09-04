@@ -385,8 +385,51 @@ def _query_groups():
     return [{"id": r[0], "name": r[1], "type": r[2], "video_count": r[3]} for r in rows]
 
 
+def _get_conversation_map():
+    """Builds fast in-memory lookup for sender names without slow correlated subqueries."""
+    conv_map = {}
+    try:
+        _db_cur.execute("SELECT id, COALESCE(name, profileName, e164, 'Unknown') FROM conversations WHERE id IS NOT NULL;")
+        for cid, name in _db_cur.fetchall():
+            conv_map[cid] = name
+        _db_cur.execute("SELECT e164, COALESCE(name, profileName, e164, 'Unknown') FROM conversations WHERE e164 IS NOT NULL AND e164 != '';")
+        for e164, name in _db_cur.fetchall():
+            conv_map[e164] = name
+    except Exception:
+        pass
+    return conv_map
+
+
+def _query_new_count() -> int:
+    with _meta_lock:
+        last_ts = _meta_data.get("last_session_timestamp", 0)
+        seen_set = set(_meta_data.get("seen_message_ids", []))
+    if last_ts <= 0:
+        return 0
+    try:
+        with _db_lock:
+            _db_cur.execute("""
+                SELECT ma.path, ma.messageId
+                FROM message_attachments ma
+                WHERE ma.contentType LIKE 'video/%'
+                  AND ma.path IS NOT NULL
+                  AND ma.localKey IS NOT NULL
+                  AND ma.sentAt > ?;
+            """, (last_ts,))
+            rows = _db_cur.fetchall()
+        count = 0
+        for path, msg_id in rows:
+            if path not in seen_set and msg_id not in seen_set:
+                count += 1
+        return count
+    except Exception:
+        return 0
+
+
 def _query_media(group_id: str = None):
     with _db_lock:
+        conv_map = _get_conversation_map()
+
         params = []
         where_conds = [
             "ma.contentType LIKE 'video/%'",
@@ -394,7 +437,7 @@ def _query_media(group_id: str = None):
             "ma.localKey IS NOT NULL"
         ]
         if group_id and group_id != 'all':
-            where_conds.append("c.id = ?")
+            where_conds.append("m.conversationId = ?")
             params.append(group_id)
 
         where_clause = " AND ".join(where_conds)
@@ -404,13 +447,8 @@ def _query_media(group_id: str = None):
                 ma.path AS item_id,
                 ma.messageId,
                 DATETIME(ma.sentAt / 1000, 'unixepoch', 'localtime') AS sent_time,
-                COALESCE(
-                    (SELECT COALESCE(name, profileName, e164) FROM conversations
-                     WHERE (m.sourceServiceId IS NOT NULL AND m.sourceServiceId != '' AND id = m.sourceServiceId)
-                        OR (m.source IS NOT NULL AND m.source != '' AND (id = m.source OR e164 = m.source))
-                     LIMIT 1),
-                    'Unknown'
-                ) AS sender,
+                m.sourceServiceId,
+                m.source,
                 ma.contentType,
                 ma.size,
                 ma.fileName,
@@ -419,37 +457,44 @@ def _query_media(group_id: str = None):
                 COALESCE(ma.sentAt, 0) AS sent_at_ms
             FROM message_attachments ma
             JOIN messages m ON m.id = ma.messageId
-            JOIN conversations c ON c.id = m.conversationId
             WHERE {where_clause}
-            GROUP BY ma.path
             ORDER BY ma.sentAt ASC;
         """
         _db_cur.execute(query, params)
         rows = _db_cur.fetchall()
 
     media = []
+    server_lookup = {}
     for r in rows:
         item_id = r[0]
         msg_id = r[1]
-        sent_at_ms = int(r[9]) if r[9] else 0
+        sent_time = r[2] or ""
+        src_service_id = r[3]
+        src_source = r[4]
+        content_type = r[5] or "video/mp4"
+        size = r[6] or 0
+        filename = r[7] or ""
+        path = r[8]
+        local_key = r[9]
+        sent_at_ms = int(r[10]) if r[10] else 0
+
+        sender = conv_map.get(src_service_id) or conv_map.get(src_source) or 'Unknown'
         meta = _get_meta(item_id, msg_id=msg_id, sent_at_ms=sent_at_ms)
+
         media.append({
             "id":           item_id,
             "message_id":   msg_id,
-            "sent_time":    r[2] or "",
-            "sender":       r[3] or "",
-            "content_type": r[4] or "video/mp4",
-            "size":         r[5] or 0,
-            "filename":     r[6] or "",
+            "sent_time":    sent_time,
+            "sender":       sender,
+            "content_type": content_type,
+            "size":         size,
+            "filename":     filename,
             "favourite":    meta["favourite"],
             "labels":       meta["labels"],
             "is_new":       meta["is_new"],
         })
+        server_lookup[item_id] = (path, local_key, size, content_type)
 
-    server_lookup = {
-        r[0]: (r[7], r[8], r[5] or 0, r[4] or "video/mp4")
-        for r in rows
-    }
     return media, server_lookup
 
 
@@ -703,7 +748,12 @@ function chipHtml(lbl, removable = false, small = false) {
 // Utilities
 // ─────────────────────────────────────────────────────────────────────────────
 function esc(s) {
-  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s ?? '')
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
 }
 function fmtDur(s) {
   if (!isFinite(s) || s < 0) return '?:??';
@@ -715,12 +765,31 @@ function fmtDur(s) {
 // Bootstrap
 // ─────────────────────────────────────────────────────────────────────────────
 async function init() {
-  const res = await fetch('/api/groups');
-  groups    = await res.json();
-  renderSidebar();
-  await refreshLabels();
-  await updateNewCount();
-  startSyncPolling();
+  $('group-list').addEventListener('click', (e) => {
+    const item = e.target.closest('.nav-item');
+    if (!item) return;
+    const id = item.dataset.id;
+    const g = groups.find(x => x.id === id);
+    if (g) loadGroup(g.id, g.name);
+  });
+
+  $('label-list').addEventListener('click', (e) => {
+    const item = e.target.closest('.nav-item');
+    if (!item) return;
+    const lbl = item.dataset.label;
+    if (lbl) loadLabel(lbl);
+  });
+
+  try {
+    const res = await fetch('/api/groups');
+    groups    = await res.json();
+    renderSidebar();
+    await refreshLabels();
+    await updateNewCount();
+    startSyncPolling();
+  } catch (err) {
+    console.error('Failed to initialize:', err);
+  }
 }
 
 let lastPendingCount = -1;
@@ -766,9 +835,9 @@ function startSyncPolling() {
 
 async function updateNewCount() {
   try {
-    const res = await fetch('/api/media?group=all');
-    const items = await res.json();
-    const count = items.filter(m => m.is_new).length;
+    const res = await fetch('/api/media/new_count');
+    const data = await res.json();
+    const count = data.count ?? 0;
     const badge = $('new-count');
     if (badge) {
       badge.textContent = count;
@@ -784,10 +853,10 @@ function renderSidebar() {
     return;
   }
   list.innerHTML = groups.map(g => `
-    <div class="nav-item" data-id="${esc(g.id)}" onclick="loadGroup('${esc(g.id)}','${esc(g.name)}')">
+    <div class="nav-item" data-id="${esc(g.id)}">
       <div>
         <div class="group-name">${esc(g.name)}</div>
-        <div class="group-count">${g.video_count} video${g.video_count!==1?'s':''} * ${esc(g.type)}</div>
+        <div class="group-count">${g.video_count} video${g.video_count!==1?'s':''} • ${esc(g.type)}</div>
       </div>
     </div>`).join('');
 }
@@ -800,7 +869,7 @@ async function refreshLabels() {
   if (!labels.length) { sec.style.display='none'; list.innerHTML=''; return; }
   sec.style.display = '';
   list.innerHTML = labels.map(lbl => `
-    <div class="nav-item" data-label="${esc(lbl)}" onclick="loadLabel('${esc(lbl)}')">
+    <div class="nav-item" data-label="${esc(lbl)}">
       <span>${chipHtml(lbl,false,true)}</span>
     </div>`).join('');
 }
@@ -824,46 +893,74 @@ function setActiveNav(type, id = null, label = null) {
 async function setView(type) {
   currentView = { type };
   setActiveNav(type);
-  if (type === 'new') {
-    $('group-title').textContent = '✨ New Videos';
-    showLoading();
+  const titles = {
+    new: '✨ New Videos',
+    all: 'All Videos',
+    favourites: 'Favourites'
+  };
+  const title = titles[type] || 'Videos';
+  $('group-title').textContent = title;
+  showLoading();
+  try {
     const res = await fetch('/api/media?group=all');
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Server error ${res.status}: ${err}`);
+    }
     const items = await res.json();
-    renderGrid(items.filter(m => m.is_new), '✨ New Videos');
-  } else if (type === 'all') {
-    $('group-title').textContent = 'All Videos';
-    showLoading();
-    const res = await fetch('/api/media?group=all');
-    const items = await res.json();
-    renderGrid(items, 'All Videos');
-  } else if (type === 'favourites') {
-    $('group-title').textContent = 'Favourites';
-    showLoading();
-    const res = await fetch('/api/media?group=all');
-    const items = await res.json();
-    renderGrid(items.filter(m => m.favourite), 'Favourites');
+    if (type === 'new') {
+      renderGrid(items.filter(m => m.is_new), title);
+    } else if (type === 'all') {
+      renderGrid(items, title);
+    } else if (type === 'favourites') {
+      renderGrid(items.filter(m => m.favourite), title);
+    }
+  } catch (err) {
+    $('loading').style.display = 'none';
+    $('empty-msg').textContent = 'Error loading videos: ' + err.message;
+    $('empty').style.display = 'flex';
   }
 }
-
 
 async function loadGroup(id, name) {
   currentView = { type: 'group', id };
   setActiveNav('group', id);
   $('group-title').textContent = name;
   showLoading();
-  const res   = await fetch('/api/media?group=' + encodeURIComponent(id));
-  const items = await res.json();
-  renderGrid(items, name);
+  try {
+    const res   = await fetch('/api/media?group=' + encodeURIComponent(id));
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Server error (${res.status}): ${err}`);
+    }
+    const items = await res.json();
+    renderGrid(items, name);
+  } catch (err) {
+    $('loading').style.display = 'none';
+    $('empty-msg').textContent = 'Error loading videos: ' + err.message;
+    $('empty').style.display = 'flex';
+  }
 }
 
 async function loadLabel(label) {
   currentView = { type: 'label', label };
   setActiveNav('label', null, label);
-  $('group-title').textContent = `Label: ${label}`;
+  const title = `Label: ${label}`;
+  $('group-title').textContent = title;
   showLoading();
-  const res = await fetch('/api/media?group=all');
-  const items = await res.json();
-  renderGrid(items.filter(m => m.labels && m.labels.includes(label)), `Label: ${label}`);
+  try {
+    const res = await fetch('/api/media?group=all');
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Server error (${res.status}): ${err}`);
+    }
+    const items = await res.json();
+    renderGrid(items.filter(m => m.labels && m.labels.includes(label)), title);
+  } catch (err) {
+    $('loading').style.display = 'none';
+    $('empty-msg').textContent = 'Error loading videos: ' + err.message;
+    $('empty').style.display = 'flex';
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1225,6 +1322,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(_query_groups())
         elif path == '/api/media':
             self._serve_media(qs.get('group', [None])[0])
+        elif path == '/api/media/new_count':
+            self._json({"count": _query_new_count()})
         elif path == '/api/labels':
             self._json(_all_labels())
         elif path == '/api/sync/status':

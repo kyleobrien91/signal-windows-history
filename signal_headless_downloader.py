@@ -89,7 +89,7 @@ def query_pending_video_groups(db_path: str, key: str) -> List[Tuple[str, str, i
         return []
 
 
-async def _evaluate_cdp(ws, expr: str):
+async def _evaluate_cdp(ws, expr: str, timeout: float = 10.0):
     """Evaluates a JavaScript expression inside the Signal Electron renderer context."""
     call_id = int(time.time() * 1000) % 1000000
     msg = {
@@ -102,14 +102,21 @@ async def _evaluate_cdp(ws, expr: str):
         }
     }
     await ws.send(json.dumps(msg))
-    while True:
-        raw = await ws.recv()
-        data = json.loads(raw)
-        if data.get("id") == call_id:
-            res = data.get("result", {})
-            if "exceptionDetails" in res:
-                return {"error": res["exceptionDetails"]}
-            return res.get("result", {}).get("value")
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=max(0.5, timeout - (time.time() - t0)))
+            data = json.loads(raw)
+            if data.get("id") == call_id:
+                res = data.get("result", {})
+                if "exceptionDetails" in res:
+                    return {"error": res["exceptionDetails"]}
+                return res.get("result", {}).get("value")
+        except asyncio.TimeoutError:
+            break
+        except Exception as e:
+            return {"error": str(e)}
+    return {"error": f"Timeout ({timeout}s) waiting for CDP evaluation"}
 
 
 async def _trigger_group_download(ws_url: str, groups: List[Tuple[str, str, int]], db_path: str, key: str, poll_interval: int = 4, max_idle_rounds: int = 8):
