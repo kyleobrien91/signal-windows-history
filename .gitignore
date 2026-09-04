@@ -1,0 +1,33 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Databases and work artifacts
+work/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+signal-player-work/
+signal-work/
+
+# Media exports & caches (never commit decrypted media!)
+exported_media/
+*.mp4
+*.mkv
+*.webm
+*.avi
+*.mov
+*.jpg
+*.jpeg
+*.png
+*.gif
+
+# Metadata and runtime files
+signal_player_meta.json
+*.log
