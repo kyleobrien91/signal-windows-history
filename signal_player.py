@@ -1479,6 +1479,9 @@ def main():
     if bg_download_mode:
         def _bg_downloader_worker():
             try:
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                if script_dir not in sys.path:
+                    sys.path.insert(0, script_dir)
                 from signal_headless_downloader import run_headless_download, get_cdp_target, query_pending_video_groups
                 # 1. Relaunch Signal with remote debugging enabled
                 print("[Background Sync] Launching Signal with --remote-debugging-port=9222...")
