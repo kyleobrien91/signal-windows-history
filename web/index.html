@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <title>Signal Player</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<div id="sidebar">
+  <div id="sidebar-header">
+    <h1>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/>
+        <path d="M10 8l6 4-6 4V8z"/>
+      </svg>
+      Signal Player
+    </h1>
+    <p>Nothing written to disk • keys stay server-side</p>
+  </div>
+  <div id="sidebar-scroll">
+    <div class="sidebar-section">Views</div>
+    <div class="nav-item" id="nav-new" onclick="setView('new')">
+      <span>✨</span><span class="group-name">New Videos</span>
+      <span class="badge" id="new-count" style="display:none;background:#10b981;color:#fff;font-weight:600">0</span>
+    </div>
+    <div class="nav-item" id="nav-all" onclick="setView('all')">
+      <span>📹</span><span class="group-name">All Videos</span>
+    </div>
+    <div class="nav-item" id="nav-fav" onclick="setView('favourites')">
+      <span>⭐</span><span class="group-name">Favourites</span>
+    </div>
+
+    <div class="sidebar-section">Groups</div>
+    <div id="group-list">
+      <div style="padding:16px;color:var(--muted);font-size:12px;text-align:center">Loading…</div>
+    </div>
+
+    <div class="sidebar-section" id="label-section" style="display:none">Labels</div>
+    <div id="label-list"></div>
+  </div>
+</div>
+
+<div id="main">
+  <div id="sync-banner" style="display:none;background:#065f46;border-bottom:1px solid #10b981;padding:8px 18px;font-size:12px;color:#ecfdf5;align-items:center;justify-content:space-between">
+    <div style="display:flex;align-items:center;gap:8px">
+      <div class="spinner" style="width:14px;height:14px;border-width:2px;border-top-color:#ecfdf5"></div>
+      <span id="sync-status-text">Signal is running in background downloading pending media...</span>
+    </div>
+    <span id="sync-stats" style="font-weight:600"></span>
+  </div>
+  <div id="toolbar">
+    <h2 id="group-title">Select a view</h2>
+    <span id="toolbar-info"></span>
+    <div id="search-wrap">
+      <button class="btn-mark-seen" id="btn-mark-all" style="display:none" onclick="markAllSeen()">✔ Mark All Seen</button>
+      <input id="search" type="text" placeholder="Search filename or label…" oninput="applyFilter()">
+    </div>
+  </div>
+
+  <div id="grid-wrap">
+    <div id="empty">
+      <svg width="44" height="44" fill="none" stroke="currentColor" stroke-width="1.4" viewBox="0 0 24 24">
+        <rect x="2" y="6" width="20" height="14" rx="2"/><path d="m10 9 5 3-5 3V9z"/>
+      </svg>
+      <span id="empty-msg">Select a group or view from the sidebar</span>
+    </div>
+    <div id="loading"><div class="spinner"></div><span>Loading media…</span></div>
+    <div id="grid"></div>
+  </div>
+</div>
+
+<!-- Full-screen modal player -->
+<div id="modal" onclick="if(event.target===this)closeModal()">
+  <button id="modal-x" onclick="closeModal()">&times;</button>
+  <video id="modal-video" controls autoplay></video>
+
+  <div id="modal-panel">
+    <div id="modal-info"></div>
+
+    <div id="modal-actions">
+      <!-- Favourite toggle -->
+      <button id="fav-btn" onclick="toggleFav()">
+        <span id="fav-icon">♡</span>
+        <span id="fav-label">Favourite</span>
+      </button>
+
+      <!-- Label input -->
+      <div id="label-wrap" onclick="document.getElementById('label-input').focus()">
+        <div id="modal-chips"></div>
+        <input id="label-input" type="text" placeholder="Add label… (Enter)" maxlength="30"
+               onkeydown="handleLabelKey(event)">
+      </div>
+    </div>
+
+    <div id="modal-nav">
+      <button class="nbtn" id="btn-prev" onclick="navigate(-1)">&#8592; Prev</button>
+      <button class="nbtn" id="btn-next" onclick="navigate(1)">Next &#8594;</button>
+    </div>
+    <div id="kb-hint">← → navigate • F favourite • Esc close</div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
