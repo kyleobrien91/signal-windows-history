@@ -222,6 +222,22 @@ async function updateNewCount() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Sidebar & Labels
 // ─────────────────────────────────────────────────────────────────────────────
+function loadGroupById(el) {
+  const id = el.dataset.id;
+  const g = groups.find(x => String(x.id) === String(id));
+  const name = g ? g.name : (el.querySelector('.group-name')?.textContent?.trim() || id);
+  log('Click', `loadGroupById invoked: "${name}" (${id})`);
+  loadGroup(id, name);
+}
+
+function loadLabelByEl(el) {
+  const lbl = el.dataset.label;
+  if (lbl) {
+    log('Click', `loadLabelByEl invoked: "${lbl}"`);
+    loadLabel(lbl);
+  }
+}
+
 function renderSidebar() {
   log('Sidebar', `renderSidebar called. Rendering ${groups.length} groups.`);
   const list = $('group-list');
@@ -235,7 +251,7 @@ function renderSidebar() {
     return;
   }
   list.innerHTML = groups.map(g => `
-    <div class="nav-item" data-id="${esc(g.id)}">
+    <div class="nav-item" data-id="${esc(g.id)}" onclick="loadGroupById(this)">
       <div>
         <div class="group-name">${esc(g.name)}</div>
         <div class="group-count">${g.video_count} video${g.video_count!==1?'s':''} • ${esc(g.type)}</div>
@@ -260,7 +276,7 @@ async function refreshLabels() {
     if (sec) sec.style.display = '';
     if (list) {
       list.innerHTML = labels.map(lbl => `
-        <div class="nav-item" data-label="${esc(lbl)}">
+        <div class="nav-item" data-label="${esc(lbl)}" onclick="loadLabelByEl(this)">
           <span>${chipHtml(lbl, false, true)}</span>
         </div>`).join('');
     }

@@ -74,8 +74,7 @@ def query_pending_video_groups(db_path: str, key: str) -> List[Tuple[str, str, i
                 COALESCE(c.name, c.profileName, c.e164, 'Unnamed') AS title, 
                 COUNT(ma.messageId) AS pending_cnt
             FROM conversations c
-            JOIN messages m ON m.conversationId = c.id
-            JOIN message_attachments ma ON ma.messageId = m.id
+            JOIN message_attachments ma ON ma.conversationId = c.id
             WHERE ma.contentType LIKE 'video/%' 
               AND (ma.path IS NULL OR ma.pending = 1)
             GROUP BY c.id
