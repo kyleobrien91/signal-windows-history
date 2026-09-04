@@ -1375,7 +1375,7 @@ def main():
     parser.add_argument('--port',       type=int, default=7788)
     parser.add_argument('--no-browser', action='store_true')
     parser.add_argument('--auto-close', action='store_true', help="Automatically close Signal if running without prompting")
-    parser.add_argument('--auto-download', action='store_true', help="Automatically run headless download via CDP if Signal is running")
+    parser.add_argument('--auto-download', '--sync', action='store_true', dest='auto_download', help="Automatically run background sync/download")
     args = parser.parse_args()
 
     print("[Signal Player] Starting…")
@@ -1383,39 +1383,59 @@ def main():
     _load_metadata()
     bg_download_mode = False
 
-    # Process Lifecycle Check
-    if is_signal_running():
+    sig_running = is_signal_running()
+
+    if args.auto_close:
+        choice = "1"
+    elif args.auto_download:
+        choice = "2"
+    else:
         print("\n" + "=" * 60)
-        print("  [!] Signal Desktop is currently running.")
-        print("=" * 60)
-        if args.auto_close:
-            choice = "1"
-        elif args.auto_download:
-            choice = "2"
-        else:
+        if sig_running:
+            print("  Signal Desktop Status: RUNNING")
+            print("=" * 60)
             print("  Please choose how you would like to proceed:")
             print("    [1] Close Signal now to copy the latest database & start player")
-            print("    [2] Perform action on Signal: iterate over groups & auto-download pending videos")
+            print("    [2] Fast startup + background sync (close Signal for snapshot, start player, relaunch in background to auto-download pending videos)")
             print("    [3] Proceed immediately (copy live database snapshot while Signal runs)")
             print("-" * 60)
             try:
-                choice = input("  Select option [1/2/3] (default: 1): ").strip() or "1"
+                choice = input("  Select option [1/2/3] (default: 2): ").strip() or "2"
             except (EOFError, KeyboardInterrupt):
-                choice = "1"
+                choice = "2"
+        else:
+            print("  Signal Desktop Status: NOT RUNNING")
+            print("=" * 60)
+            print("  Please choose how you would like to proceed:")
+            print("    [1] Start player immediately (browse currently available videos)")
+            print("    [2] Start player + background sync (launch Signal in background with CDP to auto-download pending videos)")
+            print("-" * 60)
+            try:
+                choice = input("  Select option [1/2] (default: 2): ").strip() or "2"
+            except (EOFError, KeyboardInterrupt):
+                choice = "2"
 
-        if choice == "1":
+    if choice == "1":
+        if sig_running:
             print("[Signal Player] Closing Signal Desktop...")
             kill_signal()
             print("[Signal Player] Signal closed.")
-        elif choice == "2":
+        else:
+            print("[Signal Player] Signal is not running. Starting player immediately...")
+    elif choice == "2":
+        if sig_running:
             print("\n[Signal Player] Fast startup with background media sync enabled:")
             print("  1. Closing Signal briefly to take a clean database snapshot...")
             kill_signal()
             print("  2. Database snapshot will be taken immediately so you can start viewing videos.")
             print("  3. Signal will be reopened in background with remote debugging to download pending media.")
-            bg_download_mode = True
         else:
-            print("[Signal Player] Proceeding with live database copy.")
+            print("\n[Signal Player] Starting player with background media sync enabled:")
+            print("  1. Database snapshot will be taken immediately so you can start viewing videos.")
+            print("  2. Signal will be launched in background with remote debugging to download pending media.")
+        bg_download_mode = True
+    else:
+        print("[Signal Player] Proceeding with live database copy.")
 
     print("[Signal Player] Extracting encryption key…")
     try:
