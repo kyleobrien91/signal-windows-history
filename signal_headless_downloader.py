@@ -109,8 +109,8 @@ async def _evaluate_cdp(ws, expr: str):
             return res.get("result", {}).get("value")
 
 
-async def _trigger_group_download(ws_url: str, groups: List[Tuple[str, str, int]], wait_seconds: int = 15):
-    """Iterates through groups and invokes handleReadAndDownloadAttachments over CDP."""
+async def _trigger_group_download(ws_url: str, groups: List[Tuple[str, str, int]], db_path: str, key: str, poll_interval: int = 4, max_idle_rounds: int = 8):
+    """Iterates through groups, invokes handleReadAndDownloadAttachments over CDP, and polls progress."""
     print(f"[Headless Downloader] Connecting to Signal via WebSocket: {ws_url}")
     async with websockets.connect(ws_url) as ws:
         # Verify window.ConversationController is accessible
@@ -122,9 +122,8 @@ async def _trigger_group_download(ws_url: str, groups: List[Tuple[str, str, int]
 
         print(f"[Headless Downloader] Triggering background downloads for {len(groups)} group(s)...")
         for idx, (convo_id, title, pending_count) in enumerate(groups, 1):
-            print(f"  [{idx}/{len(groups)}] Group: '{title}' ({pending_count} pending videos)")
+            print(f"  [{idx}/{len(groups)}] Queueing: '{title}' ({pending_count} pending videos)")
 
-            # JavaScript snippet that requests Signal's internal background downloader
             trigger_js = f"""
             (async () => {{
                 try {{
@@ -142,16 +141,48 @@ async def _trigger_group_download(ws_url: str, groups: List[Tuple[str, str, int]
             """
             result = await _evaluate_cdp(ws, trigger_js)
             if isinstance(result, dict) and result.get("success"):
-                print(f"       -> [OK] Download job dispatched to Signal queue")
+                print(f"       -> [OK] Download job dispatched")
             else:
                 print(f"       -> [Notice] {result}")
 
-        print(f"[Headless Downloader] All jobs dispatched. Allowing {wait_seconds}s for Signal download workers...")
-        await asyncio.sleep(wait_seconds)
+        print("\n[Headless Downloader] All download jobs dispatched. Monitoring live progress...")
+        print("  Press Ctrl+C at any time to finish with currently downloaded videos.\n")
+
+        initial_pending = sum(g[2] for g in groups)
+        last_pending = initial_pending
+        idle_count = 0
+
+        try:
+            while True:
+                await asyncio.sleep(poll_interval)
+                current_groups = query_pending_video_groups(db_path, key)
+                current_pending = sum(g[2] for g in current_groups)
+                downloaded = initial_pending - current_pending
+
+                pct = int((downloaded / initial_pending) * 100) if initial_pending > 0 else 100
+                bar = "=" * (pct // 5) + "-" * (20 - (pct // 5))
+                print(f"\r  Progress: [{bar}] {pct}% ({downloaded}/{initial_pending} downloaded, {current_pending} remaining)", end="", flush=True)
+
+                if current_pending == 0:
+                    print(f"\n[Headless Downloader] [OK] All {initial_pending} videos have downloaded successfully!\n")
+                    break
+
+                if current_pending == last_pending:
+                    idle_count += 1
+                    if idle_count >= max_idle_rounds:
+                        print(f"\n[Headless Downloader] No new downloads for {poll_interval * max_idle_rounds}s. Proceeding with currently completed media.\n")
+                        break
+                else:
+                    idle_count = 0
+                    last_pending = current_pending
+
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            print("\n[Headless Downloader] Download monitoring interrupted by user. Proceeding to player...")
+
         return True
 
 
-def run_headless_download(db_path: str, key: str, cdp_port: int = 9222, wait_seconds: int = 12) -> bool:
+def run_headless_download(db_path: str, key: str, cdp_port: int = 9222, wait_seconds: int = 15) -> bool:
     """
     Main entrypoint for programmatic headless downloads.
     Called from signal_player.py or CLI.
@@ -177,8 +208,8 @@ def run_headless_download(db_path: str, key: str, cdp_port: int = 9222, wait_sec
     total_pending = sum(g[2] for g in pending_groups)
     print(f"[Headless Downloader] Found {total_pending} pending videos across {len(pending_groups)} group(s).")
 
-    # 2. Run async CDP dispatch
-    success = asyncio.run(_trigger_group_download(ws_url, pending_groups, wait_seconds=wait_seconds))
+    # 2. Run async CDP dispatch & live database progress monitoring
+    success = asyncio.run(_trigger_group_download(ws_url, pending_groups, db_path, key))
     return success
 
 
