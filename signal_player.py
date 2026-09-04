@@ -135,6 +135,27 @@ def open_db(db_path: str, key: str):
     return conn, cur
 
 
+def reload_db(key: str):
+    """Refreshes the database snapshot and swaps the active database cursor atomically."""
+    global _db_conn, _db_cur
+    try:
+        new_path = copy_db_snapshot()
+        new_conn, new_cur = open_db(new_path, key)
+        with _db_lock:
+            old_conn = _db_conn
+            _db_conn = new_conn
+            _db_cur = new_cur
+        if old_conn:
+            try:
+                old_conn.close()
+            except Exception:
+                pass
+        return True
+    except Exception as e:
+        print(f"[Signal Player] Warning: reload_db failed: {e}")
+        return False
+
+
 # ---------------------------------------------------------------------------
 # In-memory attachment decryption — plaintext NEVER written to disk
 # ---------------------------------------------------------------------------
@@ -288,6 +309,29 @@ def _all_labels() -> list:
         for v in _meta_data["annotations"].values():
             seen.update(v.get("labels", []))
     return sorted(seen)
+
+
+_sync_lock = threading.Lock()
+_sync_state = {
+    "is_running": False,
+    "pending_count": 0,
+    "total_initial": 0,
+    "last_updated": 0
+}
+
+
+def _get_sync_status():
+    with _sync_lock:
+        return dict(_sync_state)
+
+
+def _set_sync_status(is_running: bool, pending: int = 0, initial: int = 0):
+    with _sync_lock:
+        _sync_state["is_running"] = is_running
+        _sync_state["pending_count"] = pending
+        if initial > 0:
+            _sync_state["total_initial"] = initial
+        _sync_state["last_updated"] = int(time.time() * 1000)
 
 
 # ---------------------------------------------------------------------------
@@ -527,6 +571,13 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 </div>
 
 <div id="main">
+  <div id="sync-banner" style="display:none;background:#065f46;border-bottom:1px solid #10b981;padding:8px 18px;font-size:12px;color:#ecfdf5;display:none;align-items:center;justify-content:space-between">
+    <div style="display:flex;align-items:center;gap:8px">
+      <div class="spinner" style="width:14px;height:14px;border-width:2px;border-top-color:#ecfdf5"></div>
+      <span id="sync-status-text">Signal is running in background downloading pending media...</span>
+    </div>
+    <span id="sync-stats" style="font-weight:600"></span>
+  </div>
   <div id="toolbar">
     <h2 id="group-title">Select a view</h2>
     <span id="toolbar-info"></span>
@@ -629,6 +680,48 @@ async function init() {
   renderSidebar();
   await refreshLabels();
   await updateNewCount();
+  startSyncPolling();
+}
+
+let lastPendingCount = -1;
+function startSyncPolling() {
+  setInterval(async () => {
+    try {
+      const res = await fetch('/api/sync/status');
+      if (!res.ok) return;
+      const data = await res.json();
+      const banner = $('sync-banner');
+      if (!banner) return;
+
+      if (data.is_running) {
+        banner.style.display = 'flex';
+        const rem = data.pending_count ?? 0;
+        $('sync-stats').textContent = `${rem} pending video${rem !== 1 ? 's' : ''}`;
+
+        // If newly downloaded videos were detected, refresh UI
+        if (lastPendingCount !== -1 && rem < lastPendingCount) {
+          const gRes = await fetch('/api/groups');
+          groups = await gRes.json();
+          renderSidebar();
+          await updateNewCount();
+          if (currentView && currentView.type === 'new') {
+            await setView('new');
+          } else if (currentView && currentView.type === 'group') {
+            await loadGroup(currentView.id, $('group-title').textContent);
+          }
+        }
+        lastPendingCount = rem;
+      } else {
+        if (banner.style.display !== 'none') {
+          banner.style.display = 'none';
+          const gRes = await fetch('/api/groups');
+          groups = await gRes.json();
+          renderSidebar();
+          await updateNewCount();
+        }
+      }
+    } catch (e) {}
+  }, 4000);
 }
 
 async function updateNewCount() {
@@ -1111,6 +1204,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._serve_media(qs.get('group', [None])[0])
         elif path == '/api/labels':
             self._json(_all_labels())
+        elif path == '/api/sync/status':
+            self._json(_get_sync_status())
         elif path.startswith('/stream/'):
             self._stream(unquote(path[len('/stream/'):]))
         else:
@@ -1286,6 +1381,7 @@ def main():
     print("[Signal Player] Starting…")
 
     _load_metadata()
+    bg_download_mode = False
 
     # Process Lifecycle Check
     if is_signal_running():
@@ -1312,39 +1408,12 @@ def main():
             kill_signal()
             print("[Signal Player] Signal closed.")
         elif choice == "2":
-            print("\n[Signal Player] Preparing programmatic headless video download...")
-            try:
-                from signal_headless_downloader import run_headless_download, get_cdp_target
-            except ImportError:
-                print("[Error] Could not import signal_headless_downloader.py", file=sys.stderr)
-                sys.exit(1)
-
-            # Check if remote debugging port is open
-            target = get_cdp_target(port=9222)
-            if not target:
-                print("\n[Signal Player] Signal is running, but remote debugging port 9222 is not open.")
-                print("[Signal Player] Restarting Signal with --remote-debugging-port=9222...")
-                kill_signal()
-                sig_exe = os.path.expandvars(r"%LOCALAPPDATA%\Programs\signal-desktop\Signal.exe")
-                if not os.path.exists(sig_exe):
-                    sig_exe = "Signal.exe"
-                try:
-                    subprocess.Popen([sig_exe, "--remote-debugging-port=9222"])
-                    print("[Signal Player] Waiting 5s for Signal to start...")
-                    time.sleep(5)
-                except Exception as e:
-                    print(f"[Error] Could not launch Signal: {e}", file=sys.stderr)
-
-            try:
-                key_temp = get_signal_key()
-                db_temp = copy_db_snapshot()
-                print("[Signal Player] Triggering headless group downloads...")
-                run_headless_download(db_temp, key_temp, cdp_port=9222, wait_seconds=15)
-            except Exception as e:
-                print(f"[Signal Player] Warning during headless download: {e}")
-
-            print("[Signal Player] Closing Signal to finalize database snapshot...")
+            print("\n[Signal Player] Fast startup with background media sync enabled:")
+            print("  1. Closing Signal briefly to take a clean database snapshot...")
             kill_signal()
+            print("  2. Database snapshot will be taken immediately so you can start viewing videos.")
+            print("  3. Signal will be reopened in background with remote debugging to download pending media.")
+            bg_download_mode = True
         else:
             print("[Signal Player] Proceeding with live database copy.")
 
@@ -1383,6 +1452,47 @@ def main():
 
     if not args.no_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+
+    # Launch background downloader thread if option 2 was selected
+    if bg_download_mode:
+        def _bg_downloader_worker():
+            try:
+                from signal_headless_downloader import run_headless_download, get_cdp_target, query_pending_video_groups
+                # 1. Relaunch Signal with remote debugging enabled
+                print("[Background Sync] Launching Signal with --remote-debugging-port=9222...")
+                sig_exe = os.path.expandvars(r"%LOCALAPPDATA%\Programs\signal-desktop\Signal.exe")
+                if not os.path.exists(sig_exe):
+                    sig_exe = "Signal.exe"
+                try:
+                    subprocess.Popen([sig_exe, "--remote-debugging-port=9222"])
+                    time.sleep(5)
+                except Exception as e:
+                    print(f"[Background Sync] Could not launch Signal: {e}")
+                    return
+
+                # 2. Check pending groups
+                pending_groups = query_pending_video_groups(db_path, key)
+                total_pending = sum(g[2] for g in pending_groups)
+                if total_pending == 0:
+                    print("[Background Sync] All media is already downloaded!")
+                    return
+
+                _set_sync_status(True, pending=total_pending, initial=total_pending)
+                print(f"[Background Sync] Started background download of {total_pending} pending videos across {len(pending_groups)} groups.")
+
+                # Run headless download
+                run_headless_download(db_path, key, cdp_port=9222, wait_seconds=10)
+
+                # Reload database snapshot so player immediately sees newly downloaded files
+                reload_db(key)
+                _set_sync_status(False, pending=0)
+                print("\n[Background Sync] [OK] Background media download completed and database refreshed!")
+            except Exception as e:
+                _set_sync_status(False)
+                print(f"[Background Sync] Error: {e}")
+
+        bg_thread = threading.Thread(target=_bg_downloader_worker, daemon=True)
+        bg_thread.start()
 
     try:
         server.serve_forever()
