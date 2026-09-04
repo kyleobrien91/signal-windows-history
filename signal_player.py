@@ -34,8 +34,10 @@ import hmac
 import json
 import os
 import shutil
+import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
@@ -195,41 +197,66 @@ def _get_cached(msg_id: str, enc_path: str, local_key: str, size: int) -> bytes:
 # ---------------------------------------------------------------------------
 
 _META_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "signal_player_meta.json")
-_metadata: dict = {}      # { msg_id: { "favourite": bool, "labels": [str] } }
-_meta_lock  = threading.Lock()
+_meta_data: dict = {
+    "last_session_timestamp": 0,
+    "seen_message_ids": [],
+    "annotations": {}
+}
+_session_start_ts: int = int(time.time() * 1000)
+_meta_lock = threading.Lock()
 
 
 def _load_metadata():
-    global _metadata
+    global _meta_data
     if os.path.exists(_META_PATH):
         try:
             with open(_META_PATH, "r", encoding="utf-8") as f:
-                _metadata = json.load(f)
-            print(f"[Signal Player] [OK] Metadata loaded ({len(_metadata)} entries)")
+                raw = json.load(f)
+            if isinstance(raw, dict) and "annotations" in raw:
+                _meta_data = {
+                    "last_session_timestamp": raw.get("last_session_timestamp", 0),
+                    "seen_message_ids": list(raw.get("seen_message_ids", [])),
+                    "annotations": raw.get("annotations", {}),
+                }
+            elif isinstance(raw, dict):
+                # Backwards compatible migration from { msg_id: { favourite, labels } }
+                _meta_data = {
+                    "last_session_timestamp": 0,
+                    "seen_message_ids": list(raw.keys()),
+                    "annotations": raw,
+                }
+            print(f"[Signal Player] [OK] Metadata loaded ({len(_meta_data['annotations'])} annotations, {len(_meta_data['seen_message_ids'])} seen)")
         except Exception as e:
             print(f"[Signal Player] Warning: could not load metadata: {e}")
-            _metadata = {}
+            _meta_data = {"last_session_timestamp": 0, "seen_message_ids": [], "annotations": {}}
     else:
-        _metadata = {}
+        _meta_data = {"last_session_timestamp": 0, "seen_message_ids": [], "annotations": {}}
 
 
 def _save_metadata():
     with open(_META_PATH, "w", encoding="utf-8") as f:
-        json.dump(_metadata, f, ensure_ascii=False, indent=2)
+        json.dump(_meta_data, f, ensure_ascii=False, indent=2)
 
 
-def _get_meta(msg_id: str) -> dict:
+def _get_meta(msg_id: str, sent_at_ms: int = 0) -> dict:
     with _meta_lock:
-        return dict(_metadata.get(msg_id, {"favourite": False, "labels": []}))
+        ann = _meta_data["annotations"].get(msg_id, {"favourite": False, "labels": []})
+        last_ts = _meta_data.get("last_session_timestamp", 0)
+        seen_set = set(_meta_data.get("seen_message_ids", []))
+        is_new = bool(last_ts > 0 and sent_at_ms > last_ts and msg_id not in seen_set)
+        return {
+            "favourite": bool(ann.get("favourite", False)),
+            "labels": list(ann.get("labels", [])),
+            "is_new": is_new,
+        }
 
 
 def _set_meta(msg_id: str, favourite: bool = None, labels: list = None):
     with _meta_lock:
-        entry = _metadata.setdefault(msg_id, {"favourite": False, "labels": []})
+        entry = _meta_data["annotations"].setdefault(msg_id, {"favourite": False, "labels": []})
         if favourite is not None:
             entry["favourite"] = bool(favourite)
         if labels is not None:
-            # Sanitise: unique, non-empty, max 30 chars each, max 20 labels
             seen = []
             for lbl in labels:
                 lbl = str(lbl).strip()[:30]
@@ -240,11 +267,25 @@ def _set_meta(msg_id: str, favourite: bool = None, labels: list = None):
         return dict(entry)
 
 
+def _mark_seen(msg_ids: list):
+    with _meta_lock:
+        seen_list = _meta_data.setdefault("seen_message_ids", [])
+        seen_set = set(seen_list)
+        changed = False
+        for mid in msg_ids:
+            if mid and mid not in seen_set:
+                seen_set.add(mid)
+                seen_list.append(mid)
+                changed = True
+        if changed:
+            _save_metadata()
+
+
 def _all_labels() -> list:
     """Returns all unique labels in use, sorted alphabetically."""
     with _meta_lock:
         seen = set()
-        for v in _metadata.values():
+        for v in _meta_data["annotations"].values():
             seen.update(v.get("labels", []))
     return sorted(seen)
 
@@ -290,7 +331,8 @@ def _query_media(group_id: str):
                 ma.size,
                 ma.fileName,
                 ma.path,
-                ma.localKey
+                ma.localKey,
+                COALESCE(ma.sentAt, 0) AS sent_at_ms
             FROM message_attachments ma
             JOIN messages m ON m.id = ma.messageId
             JOIN conversations c ON c.id = m.conversationId
@@ -306,7 +348,8 @@ def _query_media(group_id: str):
 
     media = []
     for r in rows:
-        meta = _get_meta(r[0])
+        sent_at_ms = int(r[8]) if r[8] else 0
+        meta = _get_meta(r[0], sent_at_ms=sent_at_ms)
         media.append({
             "id":           r[0],
             "sent_time":    r[1] or "",
@@ -316,6 +359,7 @@ def _query_media(group_id: str):
             "filename":     r[5] or "",
             "favourite":    meta["favourite"],
             "labels":       meta["labels"],
+            "is_new":       meta["is_new"],
         })
 
     server_lookup = {
@@ -323,6 +367,7 @@ def _query_media(group_id: str):
         for r in rows
     }
     return media, server_lookup
+
 
 
 _media_lookup: dict = {}
@@ -391,6 +436,9 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .play-icon svg{fill:#fff;width:13px;height:13px;margin-left:2px}
 .dur{position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.78);color:#fff;font-size:10px;padding:2px 5px;border-radius:3px;font-variant-numeric:tabular-nums}
 .fav-badge{position:absolute;top:6px;left:6px;font-size:15px;line-height:1;filter:drop-shadow(0 1px 2px rgba(0,0,0,.8))}
+.new-badge{position:absolute;top:6px;right:6px;background:#10b981;color:#fff;font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px;letter-spacing:.05em;text-transform:uppercase;box-shadow:0 1px 4px rgba(0,0,0,.6)}
+.btn-mark-seen{background:rgba(16,185,129,.15);border:1px solid rgba(16,185,129,.35);color:#34d399;padding:4px 10px;border-radius:6px;font-size:11px;font-weight:500;cursor:pointer;margin-right:8px;transition:all .15s}
+.btn-mark-seen:hover{background:#10b981;color:#fff}
 .card-meta{padding:8px 10px}
 .card-fn{font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:2px}
 .card-ts{font-size:11px;color:var(--muted);margin-bottom:4px}
@@ -457,6 +505,10 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   </div>
   <div id="sidebar-scroll">
     <div class="sidebar-section">Views</div>
+    <div class="nav-item" id="nav-new" onclick="setView('new')">
+      <span>✨</span><span class="group-name">New Videos</span>
+      <span class="badge" id="new-count" style="display:none;background:#10b981;color:#fff;font-weight:600">0</span>
+    </div>
     <div class="nav-item" id="nav-all" onclick="setView('all')">
       <span>📹</span><span class="group-name">All Videos</span>
     </div>
@@ -479,9 +531,11 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
     <h2 id="group-title">Select a view</h2>
     <span id="toolbar-info"></span>
     <div id="search-wrap">
+      <button class="btn-mark-seen" id="btn-mark-all" style="display:none" onclick="markAllSeen()">✔ Mark All Seen</button>
       <input id="search" type="text" placeholder="Search filename or label…" oninput="applyFilter()">
     </div>
   </div>
+
   <div id="grid-wrap">
     <div id="empty">
       <svg width="44" height="44" fill="none" stroke="currentColor" stroke-width="1.4" viewBox="0 0 24 24">
@@ -574,6 +628,21 @@ async function init() {
   groups    = await res.json();
   renderSidebar();
   await refreshLabels();
+  await updateNewCount();
+}
+
+async function updateNewCount() {
+  let count = 0;
+  for (const g of groups) {
+    const res = await fetch('/api/media?group=' + encodeURIComponent(g.id));
+    const items = await res.json();
+    count += items.filter(m => m.is_new).length;
+  }
+  const badge = $('new-count');
+  if (badge) {
+    badge.textContent = count;
+    badge.style.display = count > 0 ? 'inline-block' : 'none';
+  }
 }
 
 function renderSidebar() {
@@ -609,7 +678,9 @@ async function refreshLabels() {
 // ─────────────────────────────────────────────────────────────────────────────
 function setActiveNav(type, id = null, label = null) {
   document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
-  if (type === 'all')        $('nav-all')?.classList.add('active');
+  $('btn-mark-all').style.display = type === 'new' ? 'inline-block' : 'none';
+  if (type === 'new')         $('nav-new')?.classList.add('active');
+  else if (type === 'all')    $('nav-all')?.classList.add('active');
   else if (type === 'favourites') $('nav-fav')?.classList.add('active');
   else if (type === 'group' && id) {
     document.querySelector(`.nav-item[data-id="${CSS.escape(id)}"]`)?.classList.add('active');
@@ -621,7 +692,17 @@ function setActiveNav(type, id = null, label = null) {
 async function setView(type) {
   currentView = { type };
   setActiveNav(type);
-  if (type === 'all') {
+  if (type === 'new') {
+    $('group-title').textContent = '✨ New Videos';
+    showLoading();
+    const all = [];
+    for (const g of groups) {
+      const res   = await fetch('/api/media?group=' + encodeURIComponent(g.id));
+      const items = await res.json();
+      all.push(...items.filter(m => m.is_new));
+    }
+    renderGrid(all, '✨ New Videos');
+  } else if (type === 'all') {
     $('group-title').textContent = 'All Videos';
     showLoading();
     const all = [];
@@ -643,6 +724,7 @@ async function setView(type) {
     renderGrid(all, 'Favourites');
   }
 }
+
 
 async function loadGroup(id, name) {
   currentView = { type: 'group', id };
@@ -718,6 +800,7 @@ function applyFilter() {
         </div>
         <div class="dur" id="d${i}">—:——</div>
         ${m.favourite ? '<div class="fav-badge">⭐</div>' : ''}
+        ${m.is_new ? '<div class="new-badge">NEW</div>' : ''}
       </div>
       <div class="card-meta">
         <div class="card-fn">${esc(m.filename||'Video')}</div>
@@ -790,6 +873,20 @@ function openModal(i) {
   currentIdx = i;
   renderModal();
   $('modal').classList.add('open');
+
+  const m = filtered[i];
+  if (m && m.is_new) {
+    m.is_new = false;
+    const am = allMedia.find(x => x.id === m.id);
+    if (am) am.is_new = false;
+    fetch('/api/meta/seen', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: m.id })
+    }).catch(()=>{});
+    refreshCard(i, m);
+    updateNewCount();
+  }
 }
 
 function closeModal() {
@@ -822,6 +919,20 @@ function navigate(dir) {
   if (n < 0 || n >= filtered.length) return;
   currentIdx = n;
   renderModal();
+
+  const m = filtered[n];
+  if (m && m.is_new) {
+    m.is_new = false;
+    const am = allMedia.find(x => x.id === m.id);
+    if (am) am.is_new = false;
+    fetch('/api/meta/seen', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: m.id })
+    }).catch(()=>{});
+    refreshCard(n, m);
+    updateNewCount();
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -911,11 +1022,18 @@ function refreshCard(idx, m) {
   if (!card) return;
   card.classList.toggle('is-fav', m.favourite);
   // Fav badge
-  const existing = card.querySelector('.fav-badge');
-  if (m.favourite && !existing) {
+  const existingFav = card.querySelector('.fav-badge');
+  if (m.favourite && !existingFav) {
     card.querySelector('.thumb').insertAdjacentHTML('beforeend', '<div class="fav-badge">⭐</div>');
-  } else if (!m.favourite && existing) {
-    existing.remove();
+  } else if (!m.favourite && existingFav) {
+    existingFav.remove();
+  }
+  // New badge
+  const existingNew = card.querySelector('.new-badge');
+  if (m.is_new && !existingNew) {
+    card.querySelector('.thumb').insertAdjacentHTML('beforeend', '<div class="new-badge">NEW</div>');
+  } else if (!m.is_new && existingNew) {
+    existingNew.remove();
   }
   // Labels
   const labelEl = card.querySelector('.card-labels');
@@ -926,6 +1044,29 @@ function refreshCard(idx, m) {
     else meta.insertAdjacentHTML('beforeend', html);
   } else if (labelEl) {
     labelEl.remove();
+  }
+}
+
+async function markAllSeen() {
+  const newItems = allMedia.filter(m => m.is_new);
+  if (!newItems.length) return;
+  const ids = newItems.map(m => m.id);
+
+  newItems.forEach(m => { m.is_new = false; });
+  filtered.forEach(m => { if (ids.includes(m.id)) m.is_new = false; });
+
+  await fetch('/api/meta/seen', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids })
+  });
+
+  await updateNewCount();
+
+  if (currentView && currentView.type === 'new') {
+    renderGrid([], '✨ New Videos');
+  } else {
+    applyFilter();
   }
 }
 
@@ -979,7 +1120,9 @@ class _Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path   = parsed.path
 
-        if path.startswith('/api/meta/'):
+        if path == '/api/meta/seen':
+            self._handle_mark_seen()
+        elif path.startswith('/api/meta/'):
             self._update_meta(unquote(path[len('/api/meta/'):]))
         else:
             self.send_error(404)
@@ -1022,6 +1165,18 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self.send_error(500, str(e))
 
+    def _handle_mark_seen(self):
+        try:
+            body = self._read_body_json()
+            ids = body.get('ids', [])
+            if 'id' in body and body['id']:
+                ids.append(body['id'])
+            if ids:
+                _mark_seen(ids)
+            self._json({"status": "ok", "marked": len(ids)})
+        except Exception as e:
+            self.send_error(500, str(e))
+
     def _update_meta(self, msg_id):
         """
         POST /api/meta/<messageId>
@@ -1038,6 +1193,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(entry)
         except Exception as e:
             self.send_error(500, str(e))
+
 
     def _stream(self, msg_id):
         with _lookup_lock:
@@ -1089,6 +1245,28 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
 
 
+def is_signal_running() -> bool:
+    """Checks if Signal.exe is currently running on Windows."""
+    try:
+        out = subprocess.check_output(
+            ["tasklist", "/FI", "IMAGENAME eq Signal.exe", "/FO", "CSV", "/NH"],
+            text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        )
+        return "signal.exe" in out.lower()
+    except Exception:
+        return False
+
+
+def kill_signal():
+    """Terminates running Signal.exe processes."""
+    try:
+        subprocess.run(["taskkill", "/F", "/IM", "Signal.exe"], capture_output=True)
+        time.sleep(1)
+    except Exception as e:
+        print(f"[Signal Player] Warning: failed to terminate Signal: {e}")
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -1101,11 +1279,74 @@ def main():
     )
     parser.add_argument('--port',       type=int, default=7788)
     parser.add_argument('--no-browser', action='store_true')
+    parser.add_argument('--auto-close', action='store_true', help="Automatically close Signal if running without prompting")
+    parser.add_argument('--auto-download', action='store_true', help="Automatically run headless download via CDP if Signal is running")
     args = parser.parse_args()
 
     print("[Signal Player] Starting…")
 
     _load_metadata()
+
+    # Process Lifecycle Check
+    if is_signal_running():
+        print("\n" + "=" * 60)
+        print("  [!] Signal Desktop is currently running.")
+        print("=" * 60)
+        if args.auto_close:
+            choice = "1"
+        elif args.auto_download:
+            choice = "2"
+        else:
+            print("  Please choose how you would like to proceed:")
+            print("    [1] Close Signal now to copy the latest database & start player")
+            print("    [2] Perform action on Signal: iterate over groups & auto-download pending videos")
+            print("    [3] Proceed immediately (copy live database snapshot while Signal runs)")
+            print("-" * 60)
+            try:
+                choice = input("  Select option [1/2/3] (default: 1): ").strip() or "1"
+            except (EOFError, KeyboardInterrupt):
+                choice = "1"
+
+        if choice == "1":
+            print("[Signal Player] Closing Signal Desktop...")
+            kill_signal()
+            print("[Signal Player] Signal closed.")
+        elif choice == "2":
+            print("\n[Signal Player] Preparing programmatic headless video download...")
+            try:
+                from signal_headless_downloader import run_headless_download, get_cdp_target
+            except ImportError:
+                print("[Error] Could not import signal_headless_downloader.py", file=sys.stderr)
+                sys.exit(1)
+
+            # Check if remote debugging port is open
+            target = get_cdp_target(port=9222)
+            if not target:
+                print("\n[Signal Player] Signal is running, but remote debugging port 9222 is not open.")
+                print("[Signal Player] Restarting Signal with --remote-debugging-port=9222...")
+                kill_signal()
+                sig_exe = os.path.expandvars(r"%LOCALAPPDATA%\Programs\signal-desktop\Signal.exe")
+                if not os.path.exists(sig_exe):
+                    sig_exe = "Signal.exe"
+                try:
+                    subprocess.Popen([sig_exe, "--remote-debugging-port=9222"])
+                    print("[Signal Player] Waiting 5s for Signal to start...")
+                    time.sleep(5)
+                except Exception as e:
+                    print(f"[Error] Could not launch Signal: {e}", file=sys.stderr)
+
+            try:
+                key_temp = get_signal_key()
+                db_temp = copy_db_snapshot()
+                print("[Signal Player] Triggering headless group downloads...")
+                run_headless_download(db_temp, key_temp, cdp_port=9222, wait_seconds=15)
+            except Exception as e:
+                print(f"[Signal Player] Warning during headless download: {e}")
+
+            print("[Signal Player] Closing Signal to finalize database snapshot...")
+            kill_signal()
+        else:
+            print("[Signal Player] Proceeding with live database copy.")
 
     print("[Signal Player] Extracting encryption key…")
     try:
@@ -1155,6 +1396,10 @@ def main():
             _db_conn.close()
         except Exception:
             pass
+        # Record session timestamp so new videos arriving next time are detected
+        with _meta_lock:
+            _meta_data["last_session_timestamp"] = _session_start_ts
+            _save_metadata()
         print("[Signal Player] Done.")
 
 
