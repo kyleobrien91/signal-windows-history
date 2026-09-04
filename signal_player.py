@@ -259,12 +259,13 @@ def _save_metadata():
         json.dump(_meta_data, f, ensure_ascii=False, indent=2)
 
 
-def _get_meta(msg_id: str, sent_at_ms: int = 0) -> dict:
+def _get_meta(item_id: str, msg_id: str = "", sent_at_ms: int = 0) -> dict:
     with _meta_lock:
-        ann = _meta_data["annotations"].get(msg_id, {"favourite": False, "labels": []})
+        ann = _meta_data["annotations"].get(item_id) or _meta_data["annotations"].get(msg_id, {"favourite": False, "labels": []})
         last_ts = _meta_data.get("last_session_timestamp", 0)
         seen_set = set(_meta_data.get("seen_message_ids", []))
-        is_new = bool(last_ts > 0 and sent_at_ms > last_ts and msg_id not in seen_set)
+        is_seen = (item_id in seen_set) or (msg_id in seen_set)
+        is_new = bool(last_ts > 0 and sent_at_ms > last_ts and not is_seen)
         return {
             "favourite": bool(ann.get("favourite", False)),
             "labels": list(ann.get("labels", [])),
@@ -350,7 +351,7 @@ def _query_groups():
                 c.id,
                 COALESCE(c.name, c.profileName, c.e164, 'Unnamed') AS title,
                 c.type,
-                COUNT(ma.messageId) AS video_count
+                COUNT(DISTINCT ma.path) AS video_count
             FROM conversations c
             JOIN messages m ON m.conversationId = c.id
             JOIN message_attachments ma ON ma.messageId = m.id
@@ -364,13 +365,32 @@ def _query_groups():
     return [{"id": r[0], "name": r[1], "type": r[2], "video_count": r[3]} for r in rows]
 
 
-def _query_media(group_id: str):
+def _query_media(group_id: str = None):
     with _db_lock:
-        _db_cur.execute("""
+        params = []
+        where_conds = [
+            "ma.contentType LIKE 'video/%'",
+            "ma.path IS NOT NULL",
+            "ma.localKey IS NOT NULL"
+        ]
+        if group_id and group_id != 'all':
+            where_conds.append("c.id = ?")
+            params.append(group_id)
+
+        where_clause = " AND ".join(where_conds)
+
+        query = f"""
             SELECT
+                ma.path AS item_id,
                 ma.messageId,
                 DATETIME(ma.sentAt / 1000, 'unixepoch', 'localtime') AS sent_time,
-                COALESCE(src.name, src.profileName, src.e164, 'Unknown') AS sender,
+                COALESCE(
+                    (SELECT COALESCE(name, profileName, e164) FROM conversations
+                     WHERE (m.sourceServiceId IS NOT NULL AND m.sourceServiceId != '' AND id = m.sourceServiceId)
+                        OR (m.source IS NOT NULL AND m.source != '' AND (id = m.source OR e164 = m.source))
+                     LIMIT 1),
+                    'Unknown'
+                ) AS sender,
                 ma.contentType,
                 ma.size,
                 ma.fileName,
@@ -380,34 +400,34 @@ def _query_media(group_id: str):
             FROM message_attachments ma
             JOIN messages m ON m.id = ma.messageId
             JOIN conversations c ON c.id = m.conversationId
-            LEFT JOIN conversations src
-                ON src.id = m.sourceServiceId OR src.e164 = m.source
-            WHERE c.id = ?
-              AND ma.contentType LIKE 'video/%'
-              AND ma.path IS NOT NULL
-              AND ma.localKey IS NOT NULL
+            WHERE {where_clause}
+            GROUP BY ma.path
             ORDER BY ma.sentAt ASC;
-        """, (group_id,))
+        """
+        _db_cur.execute(query, params)
         rows = _db_cur.fetchall()
 
     media = []
     for r in rows:
-        sent_at_ms = int(r[8]) if r[8] else 0
-        meta = _get_meta(r[0], sent_at_ms=sent_at_ms)
+        item_id = r[0]
+        msg_id = r[1]
+        sent_at_ms = int(r[9]) if r[9] else 0
+        meta = _get_meta(item_id, msg_id=msg_id, sent_at_ms=sent_at_ms)
         media.append({
-            "id":           r[0],
-            "sent_time":    r[1] or "",
-            "sender":       r[2] or "",
-            "content_type": r[3] or "video/mp4",
-            "size":         r[4] or 0,
-            "filename":     r[5] or "",
+            "id":           item_id,
+            "message_id":   msg_id,
+            "sent_time":    r[2] or "",
+            "sender":       r[3] or "",
+            "content_type": r[4] or "video/mp4",
+            "size":         r[5] or 0,
+            "filename":     r[6] or "",
             "favourite":    meta["favourite"],
             "labels":       meta["labels"],
             "is_new":       meta["is_new"],
         })
 
     server_lookup = {
-        r[0]: (r[6], r[7], r[4] or 0, r[3] or "video/mp4")
+        r[0]: (r[7], r[8], r[5] or 0, r[4] or "video/mp4")
         for r in rows
     }
     return media, server_lookup
@@ -725,17 +745,16 @@ function startSyncPolling() {
 }
 
 async function updateNewCount() {
-  let count = 0;
-  for (const g of groups) {
-    const res = await fetch('/api/media?group=' + encodeURIComponent(g.id));
+  try {
+    const res = await fetch('/api/media?group=all');
     const items = await res.json();
-    count += items.filter(m => m.is_new).length;
-  }
-  const badge = $('new-count');
-  if (badge) {
-    badge.textContent = count;
-    badge.style.display = count > 0 ? 'inline-block' : 'none';
-  }
+    const count = items.filter(m => m.is_new).length;
+    const badge = $('new-count');
+    if (badge) {
+      badge.textContent = count;
+      badge.style.display = count > 0 ? 'inline-block' : 'none';
+    }
+  } catch (e) {}
 }
 
 function renderSidebar() {
@@ -788,33 +807,21 @@ async function setView(type) {
   if (type === 'new') {
     $('group-title').textContent = '✨ New Videos';
     showLoading();
-    const all = [];
-    for (const g of groups) {
-      const res   = await fetch('/api/media?group=' + encodeURIComponent(g.id));
-      const items = await res.json();
-      all.push(...items.filter(m => m.is_new));
-    }
-    renderGrid(all, '✨ New Videos');
+    const res = await fetch('/api/media?group=all');
+    const items = await res.json();
+    renderGrid(items.filter(m => m.is_new), '✨ New Videos');
   } else if (type === 'all') {
     $('group-title').textContent = 'All Videos';
     showLoading();
-    const all = [];
-    for (const g of groups) {
-      const res   = await fetch('/api/media?group=' + encodeURIComponent(g.id));
-      const items = await res.json();
-      all.push(...items);
-    }
-    renderGrid(all, 'All Videos');
+    const res = await fetch('/api/media?group=all');
+    const items = await res.json();
+    renderGrid(items, 'All Videos');
   } else if (type === 'favourites') {
     $('group-title').textContent = 'Favourites';
     showLoading();
-    const all = [];
-    for (const g of groups) {
-      const res   = await fetch('/api/media?group=' + encodeURIComponent(g.id));
-      const items = await res.json();
-      all.push(...items.filter(m => m.favourite));
-    }
-    renderGrid(all, 'Favourites');
+    const res = await fetch('/api/media?group=all');
+    const items = await res.json();
+    renderGrid(items.filter(m => m.favourite), 'Favourites');
   }
 }
 
@@ -834,13 +841,9 @@ async function loadLabel(label) {
   setActiveNav('label', null, label);
   $('group-title').textContent = `Label: ${label}`;
   showLoading();
-  const all = [];
-  for (const g of groups) {
-    const res   = await fetch('/api/media?group=' + encodeURIComponent(g.id));
-    const items = await res.json();
-    all.push(...items.filter(m => m.labels.includes(label)));
-  }
-  renderGrid(all, `Label: ${label}`);
+  const res = await fetch('/api/media?group=all');
+  const items = await res.json();
+  renderGrid(items.filter(m => m.labels && m.labels.includes(label)), `Label: ${label}`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1250,8 +1253,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _serve_media(self, group_id):
         if not group_id:
-            self.send_error(400, "Missing ?group= parameter")
-            return
+            group_id = 'all'
         try:
             media, lookup = _query_media(group_id)
             with _lookup_lock:
