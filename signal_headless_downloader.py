@@ -62,28 +62,31 @@ def query_pending_video_groups(db_path: str, key: str) -> List[Tuple[str, str, i
     Connects to Signal SQLCipher snapshot and returns groups with pending videos:
     [(conversationId, groupName, pending_count), ...]
     """
-    conn = sqlcipher3.connect(db_path)
-    cur = conn.cursor()
-    cur.execute(f"PRAGMA key = \"x'{key}'\";")
-    cur.execute("PRAGMA cipher_compatibility = 4;")
+    try:
+        conn = sqlcipher3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute(f"PRAGMA key = \"x'{key}'\";")
+        cur.execute("PRAGMA cipher_compatibility = 4;")
 
-    cur.execute("""
-        SELECT 
-            c.id, 
-            COALESCE(c.name, c.profileName, c.e164, 'Unnamed') AS title, 
-            COUNT(ma.messageId) AS pending_cnt
-        FROM conversations c
-        JOIN messages m ON m.conversationId = c.id
-        JOIN message_attachments ma ON ma.messageId = m.id
-        WHERE ma.contentType LIKE 'video/%' 
-          AND (ma.path IS NULL OR ma.pending = 1)
-        GROUP BY c.id
-        HAVING pending_cnt > 0
-        ORDER BY pending_cnt DESC;
-    """)
-    rows = cur.fetchall()
-    conn.close()
-    return [(r[0], r[1], r[2]) for r in rows]
+        cur.execute("""
+            SELECT 
+                c.id, 
+                COALESCE(c.name, c.profileName, c.e164, 'Unnamed') AS title, 
+                COUNT(ma.messageId) AS pending_cnt
+            FROM conversations c
+            JOIN messages m ON m.conversationId = c.id
+            JOIN message_attachments ma ON ma.messageId = m.id
+            WHERE ma.contentType LIKE 'video/%' 
+              AND (ma.path IS NULL OR ma.pending = 1)
+            GROUP BY c.id
+            HAVING pending_cnt > 0
+            ORDER BY pending_cnt DESC;
+        """)
+        rows = cur.fetchall()
+        conn.close()
+        return [(r[0], r[1], r[2]) for r in rows]
+    except Exception as e:
+        return []
 
 
 async def _evaluate_cdp(ws, expr: str):

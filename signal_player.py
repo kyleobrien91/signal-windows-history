@@ -114,16 +114,33 @@ def get_signal_key() -> str:
 def copy_db_snapshot() -> str:
     appdata = os.environ.get("APPDATA", "")
     src     = os.path.join(appdata, "Signal", "sql")
-    dst_dir = os.path.join(os.environ.get("TEMP", "."), "signal-player-work")
+    # Unique timestamped directory prevents Windows file-lock collisions with open connections
+    dst_dir = os.path.join(os.environ.get("TEMP", "."), f"signal-player-work-{int(time.time()*1000)}")
     os.makedirs(dst_dir, exist_ok=True)
     db_src  = os.path.join(src, "db.sqlite")
     wal_src = os.path.join(src, "db.sqlite-wal")
+    shm_src = os.path.join(src, "db.sqlite-shm")
     db_dst  = os.path.join(dst_dir, "db.sqlite")
+    wal_dst = os.path.join(dst_dir, "db.sqlite-wal")
+    shm_dst = os.path.join(dst_dir, "db.sqlite-shm")
+
     if not os.path.exists(db_src):
         raise FileNotFoundError(f"Signal DB not found: {db_src}")
-    shutil.copy2(db_src, db_dst)
-    if os.path.exists(wal_src):
-        shutil.copy2(wal_src, os.path.join(dst_dir, "db.sqlite-wal"))
+
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            if os.path.exists(shm_src):
+                shutil.copy2(shm_src, shm_dst)
+            if os.path.exists(wal_src):
+                shutil.copy2(wal_src, wal_dst)
+            shutil.copy2(db_src, db_dst)
+            break
+        except Exception:
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(0.3)
+
     return db_dst
 
 
@@ -132,6 +149,9 @@ def open_db(db_path: str, key: str):
     cur  = conn.cursor()
     cur.execute(f"PRAGMA key = \"x'{key}'\";")
     cur.execute("PRAGMA cipher_compatibility = 4;")
+    # Quick sanity check to verify decryption and WAL recovery
+    cur.execute("SELECT count(*) FROM sqlite_master;")
+    cur.fetchone()
     return conn, cur
 
 
@@ -152,7 +172,7 @@ def reload_db(key: str):
                 pass
         return True
     except Exception as e:
-        print(f"[Signal Player] Warning: reload_db failed: {e}")
+        print(f"[Signal Player] Warning: reload_db failed (keeping existing connection): {e}")
         return False
 
 
