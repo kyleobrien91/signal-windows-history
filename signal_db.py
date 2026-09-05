@@ -199,7 +199,7 @@ def _query_media(group_id: str = None) -> Tuple[List[dict], dict]:
             FROM message_attachments ma
             LEFT JOIN messages m ON m.id = ma.messageId
             WHERE {where_clause}
-            ORDER BY ma.sentAt ASC;
+            ORDER BY ma.sentAt DESC;
         """
         _db_cur.execute(query, params)
         rows = _db_cur.fetchall()
