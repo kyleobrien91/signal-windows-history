@@ -21,6 +21,7 @@ Prerequisites:
 import asyncio
 import json
 import os
+import shutil
 import sys
 import time
 import urllib.request
@@ -166,7 +167,19 @@ async def _trigger_group_download(ws_url: str, groups: List[Tuple[str, str, int]
         try:
             while True:
                 await asyncio.sleep(poll_interval)
-                current_groups = query_pending_video_groups(db_path, key)
+                # Query fresh database snapshot to observe Signal Desktop's live download progress
+                try:
+                    from db import copy_db_snapshot
+                    poll_path = copy_db_snapshot()
+                    current_groups = query_pending_video_groups(poll_path, key)
+                    try:
+                        shutil.rmtree(os.path.dirname(poll_path), ignore_errors=True)
+                    except Exception:
+                        pass
+                except Exception:
+                    # Fallback to current db_path if taking snapshot fails
+                    current_groups = query_pending_video_groups(db_path, key)
+
                 current_pending = sum(g[2] for g in current_groups)
                 downloaded = initial_pending - current_pending
 

@@ -12,7 +12,7 @@ import threading
 from typing import Dict, List, Tuple
 
 from .snapshot import copy_db_snapshot
-from .queries import (_db_conn, _db_cur, _db_lock, _query_groups, _query_media,
+from .queries import (_db_lock, _query_groups, _query_media,
                     _query_new_count, _get_conversation_map)
 import db.queries as queries
 
@@ -27,10 +27,16 @@ def open_db(db_path: str, key: str):
     # Sanity check to ensure decryption succeeded
     cur.execute("SELECT count(*) FROM sqlite_master;")
     cur.fetchone()
+    return conn, cur
+
+
+def set_active_db(conn, cur):
+    """Sets the active database connection and cursor for queries."""
     with queries._db_lock:
+        old_conn = queries._db_conn
         queries._db_conn = conn
         queries._db_cur  = cur
-    return conn, cur
+    return old_conn
 
 
 def reload_db(key: str) -> bool:
@@ -56,12 +62,12 @@ def reload_db(key: str) -> bool:
 __all__ = [
     "copy_db_snapshot",
     "open_db",
+    "set_active_db",
     "reload_db",
     "_query_groups",
     "_query_media",
     "_query_new_count",
     "_get_conversation_map",
-    "_db_conn",
-    "_db_cur",
     "_db_lock",
 ]
+
