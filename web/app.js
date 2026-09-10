@@ -41,6 +41,7 @@ let filtered     = [];    // after search/label filter
 let currentIdx   = -1;
 let currentView  = null;  // { type: 'group'|'all'|'favourites'|'label', id?, label? }
 let groups       = [];
+let sortOrder    = 'desc'; // 'desc' = newest to oldest (default), 'asc' = oldest to newest
 const hoverState = {};
 let lastPendingCount = -1;
 
@@ -438,9 +439,30 @@ function showLoading() {
   $('loading').style.display = 'flex';
 }
 
+function sortMedia() {
+  log('Sort', `sortMedia running with sortOrder="${sortOrder}", total items=${allMedia.length}`);
+  allMedia.sort((a, b) => {
+    const tA = Number(a.sent_at) || (a.sent_time ? new Date(a.sent_time.replace(' ', 'T')).getTime() : 0) || 0;
+    const tB = Number(b.sent_at) || (b.sent_time ? new Date(b.sent_time.replace(' ', 'T')).getTime() : 0) || 0;
+    return sortOrder === 'asc' ? tA - tB : tB - tA;
+  });
+}
+
+function changeSort(order) {
+  sortOrder = order;
+  log('Sort', `changeSort invoked: order="${order}"`);
+  const sel = $('sort-select');
+  if (sel && sel.value !== order) sel.value = order;
+  sortMedia();
+  applyFilter();
+}
+
 function renderGrid(media, title) {
   log('Grid', `renderGrid called with ${media.length} items, title="${title}"`);
   allMedia = media;
+  const sel = $('sort-select');
+  if (sel) sel.value = sortOrder;
+  sortMedia();
   $('loading').style.display = 'none';
   $('toolbar-info').textContent = `${media.length} video${media.length!==1?'s':''}`;
   $('search').value = '';

@@ -176,6 +176,27 @@ body {
   color: var(--muted);
 }
 
+#sort-select {
+  background: rgba(255, 255, 255, .07);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+  cursor: pointer;
+  margin-right: 8px;
+}
+
+#sort-select:focus {
+  border-color: var(--accent);
+}
+
+#sort-select option {
+  background: var(--card);
+  color: var(--text);
+}
+
 #grid-wrap {
   flex: 1;
   overflow-y: auto;

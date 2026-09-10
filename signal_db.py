@@ -183,11 +183,13 @@ def _query_media(group_id: str = None) -> Tuple[List[dict], dict]:
 
         where_clause = " AND ".join(where_conds)
 
+        ts_expr = "COALESCE(NULLIF(ma.sentAt, 0), NULLIF(m.sent_at, 0), NULLIF(m.timestamp, 0), NULLIF(ma.receivedAt, 0), NULLIF(m.received_at, 0), 0)"
+
         query = f"""
             SELECT
                 ma.path AS item_id,
                 ma.messageId,
-                DATETIME(ma.sentAt / 1000, 'unixepoch', 'localtime') AS sent_time,
+                DATETIME({ts_expr} / 1000, 'unixepoch', 'localtime') AS sent_time,
                 m.sourceServiceId,
                 m.source,
                 ma.contentType,
@@ -195,11 +197,11 @@ def _query_media(group_id: str = None) -> Tuple[List[dict], dict]:
                 ma.fileName,
                 ma.path,
                 ma.localKey,
-                COALESCE(ma.sentAt, 0) AS sent_at_ms
+                {ts_expr} AS sent_at_ms
             FROM message_attachments ma
             LEFT JOIN messages m ON m.id = ma.messageId
             WHERE {where_clause}
-            ORDER BY ma.sentAt DESC;
+            ORDER BY {ts_expr} DESC, ma.rowid DESC;
         """
         _db_cur.execute(query, params)
         rows = _db_cur.fetchall()
@@ -226,6 +228,7 @@ def _query_media(group_id: str = None) -> Tuple[List[dict], dict]:
             "id":           item_id,
             "message_id":   msg_id,
             "sent_time":    sent_time,
+            "sent_at":      sent_at_ms,
             "sender":       sender,
             "content_type": content_type,
             "size":         size,
@@ -235,5 +238,8 @@ def _query_media(group_id: str = None) -> Tuple[List[dict], dict]:
             "is_new":       meta["is_new"],
         })
         server_lookup[item_id] = (path, local_key, size, content_type)
+
+    # Ensure media is strictly sorted newest to oldest (descending sent_at)
+    media.sort(key=lambda m: m.get("sent_at", 0), reverse=True)
 
     return media, server_lookup

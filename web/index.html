@@ -55,6 +55,10 @@
     <span id="toolbar-info"></span>
     <div id="search-wrap">
       <button class="btn-mark-seen" id="btn-mark-all" style="display:none" onclick="markAllSeen()">✔ Mark All Seen</button>
+      <select id="sort-select" onchange="changeSort(this.value)" title="Sort order">
+        <option value="desc" selected>Newest First</option>
+        <option value="asc">Oldest First</option>
+      </select>
       <input id="search" type="text" placeholder="Search filename or label…" oninput="applyFilter()">
     </div>
   </div>
