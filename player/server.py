@@ -172,7 +172,7 @@ def main():
                 script_dir = os.path.dirname(os.path.abspath(__file__))
                 if script_dir not in sys.path:
                     sys.path.insert(0, script_dir)
-                from signal_headless_downloader import run_headless_download, query_pending_video_groups
+                from downloader.dispatcher import run_headless_download, query_pending_video_groups
 
                 print("[Background Sync] Launching Signal with --remote-debugging-port=9222...")
                 sig_exe = os.path.expandvars(r"%LOCALAPPDATA%\Programs\signal-desktop\Signal.exe")

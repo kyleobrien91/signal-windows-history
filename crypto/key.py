@@ -14,9 +14,37 @@ by:
 import base64
 import json
 import os
+import threading
+from collections import OrderedDict
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from crypto.dpapi import dpapi_decrypt
+from crypto.attachment import decrypt_attachment
+
+
+_CACHE_MAX = 10
+_cache: OrderedDict = OrderedDict()
+_cache_lock = threading.Lock()
+
+
+def _get_cached(msg_id: str, enc_path: str, local_key: str, size: int) -> bytes:
+    """Returns decrypted blob from RAM cache or decrypts on demand."""
+    # Read encrypted data from file
+    with open(enc_path, "rb") as fh:
+        enc_data = fh.read()
+
+    with _cache_lock:
+        if msg_id in _cache:
+            _cache.move_to_end(msg_id)
+            return _cache[msg_id]
+
+    data = decrypt_attachment(enc_data, local_key, size)
+
+    with _cache_lock:
+        if len(_cache) >= _CACHE_MAX:
+            _cache.popitem(last=False)
+        _cache[msg_id] = data
+    return data
 
 
 def get_signal_key() -> str:
