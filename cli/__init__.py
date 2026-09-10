@@ -6,28 +6,7 @@ Signal Desktop history on Windows.
 """
 
 import argparse
-import json
-import os
 import sys
-
-import ctypes
-from ctypes import wintypes
-import hashlib
-import hmac
-import json as json_mod
-import os
-import shutil
-import sys
-import time
-from typing import Dict, List, Tuple
-
-try:
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-except ImportError:
-    print("Error: 'cryptography' library is required. Install via: pip install cryptography", file=sys.stderr)
-    sys.exit(1)
-
 
 try:
     import sqlcipher3

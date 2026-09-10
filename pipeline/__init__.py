@@ -5,6 +5,4 @@ Handles video scaling and processing for the Signal Windows History
 workflow. Separate concern from the core player/download modules.
 """
 
-__all__ = [
-    "process_video",
-]
+__all__ = []

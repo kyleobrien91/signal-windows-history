@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""
+r"""
 crypto/key.py - Windows Signal Desktop SQLCipher key extractor.
 
 Extracts the 64-hex-character SQLCipher key from Signal Desktop on Windows
@@ -29,14 +29,14 @@ _cache_lock = threading.Lock()
 
 def _get_cached(msg_id: str, enc_path: str, local_key: str, size: int) -> bytes:
     """Returns decrypted blob from RAM cache or decrypts on demand."""
-    # Read encrypted data from file
-    with open(enc_path, "rb") as fh:
-        enc_data = fh.read()
-
     with _cache_lock:
         if msg_id in _cache:
             _cache.move_to_end(msg_id)
             return _cache[msg_id]
+
+    # Read encrypted data from file
+    with open(enc_path, "rb") as fh:
+        enc_data = fh.read()
 
     data = decrypt_attachment(enc_data, local_key, size)
 
