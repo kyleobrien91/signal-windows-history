@@ -21,7 +21,7 @@ import webbrowser
 # Global state for streaming lookup & attachment root
 _media_lookup: dict = {}
 _lookup_lock = threading.Lock()
-_attatch_root = ""
+_attach_root = ""
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
 
@@ -148,9 +148,9 @@ def main():
         sys.exit(1)
     print("[Signal Player] [OK] Database opened")
 
-    global _attatch_root
-    _attatch_root = os.path.join(os.environ.get("APPDATA", ""), "Signal", "attachments.noindex")
-    print(f"[Signal Player] [OK] Attachments root: {_attatch_root}")
+    global _attach_root
+    _attach_root = os.path.join(os.environ.get("APPDATA", ""), "Signal", "attachments.noindex")
+    print(f"[Signal Player] [OK] Attachments root: {_attach_root}")
 
     server = ThreadingHTTPServer(('127.0.0.1', args.port), _Handler)
     url = f"http://127.0.0.1:{args.port}"
@@ -185,6 +185,9 @@ def main():
                     print(f"[Background Sync] Could not launch Signal: {e}")
                     return
 
+                from metadata import _set_sync_status
+                from db import reload_db
+
                 pending_groups = query_pending_video_groups(db_path, key)
                 total_pending = sum(g[2] for g in pending_groups)
                 if total_pending == 0:
@@ -200,6 +203,7 @@ def main():
                 _set_sync_status(False, pending=0)
                 print("\n[Background Sync] [OK] Background media download completed and database refreshed!")
             except Exception as e:
+                from metadata import _set_sync_status
                 _set_sync_status(False)
                 print(f"[Background Sync] Error: {e}")
 
@@ -220,8 +224,10 @@ def main():
         except Exception:
             pass
         # Record session timestamp so new videos arriving next time are detected
+        from metadata import _save_metadata
+        from metadata.store import _meta_data
         with _meta_lock:
-            signal_meta._meta_data["last_session_timestamp"] = _session_start_ts
+            _meta_data["last_session_timestamp"] = _session_start_ts
             _save_metadata()
         print("[Signal Player] Done.")
 
@@ -382,7 +388,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         rel_path, local_key, size, content_type = entry
-        enc_path = os.path.join(_attatch_root, rel_path)
+        enc_path = os.path.join(_attach_root, rel_path)
 
         if not os.path.exists(enc_path):
             self.send_error(404, "Encrypted file missing from attachments.noindex")
@@ -426,14 +432,14 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 # Global state initialization (import-side effects)
-import signal_meta
-import signal_db
+import metadata
+import metadata.store as metadata_store
+import db
 import crypto
 import time
 
-_META_PATH = signal_meta._META_PATH
-_meta_lock = signal_meta._meta_lock
+_META_PATH = metadata._META_PATH
+_meta_lock = metadata._meta_lock
 _session_start_ts = int(time.time() * 1000)
 _cache = crypto._cache if hasattr(crypto, '_cache') else {}
 _cache_lock = crypto._cache_lock if hasattr(crypto, '_cache_lock') else threading.Lock()
-_session_start_ts = int(time.time() * 1000)

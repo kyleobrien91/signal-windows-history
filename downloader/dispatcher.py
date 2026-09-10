@@ -226,6 +226,8 @@ def run_headless_download(db_path: str, key: str, cdp_port: int = 9222, wait_sec
 
 if __name__ == "__main__":
     import argparse
+    from crypto import get_signal_key
+    from db import copy_db_snapshot
 
     parser = argparse.ArgumentParser(description="Signal Desktop Headless Media Downloader via CDP")
     parser.add_argument("--port", type=int, default=9222, help="Signal CDP remote debugging port (default: 9222)")

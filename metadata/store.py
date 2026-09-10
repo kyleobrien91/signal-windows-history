@@ -17,7 +17,7 @@ _meta_data = {
     "seen_message_ids": [],
     "annotations": {}
 }
-_meta_lock = threading.Lock()
+_meta_lock = threading.RLock()
 
 
 def _load_metadata():
@@ -109,3 +109,32 @@ def _all_labels() -> list:
         for v in _meta_data["annotations"].values():
             seen.update(v.get("labels", []))
     return sorted(seen)
+
+
+# ---------------------------------------------------------------------------
+# Background Sync State Tracker
+# ---------------------------------------------------------------------------
+
+_sync_lock = threading.RLock()
+_sync_state = {
+    "is_running": False,
+    "pending_count": 0,
+    "total_initial": 0,
+    "last_updated": 0
+}
+
+
+def _get_sync_status():
+    """Thread-safe snapshot of headless background sync status."""
+    with _sync_lock:
+        return dict(_sync_state)
+
+
+def _set_sync_status(is_running: bool, pending: int = 0, initial: int = 0):
+    """Updates headless background sync status."""
+    with _sync_lock:
+        _sync_state["is_running"] = is_running
+        _sync_state["pending_count"] = pending
+        if initial > 0:
+            _sync_state["total_initial"] = initial
+        _sync_state["last_updated"] = int(time.time() * 1000)
