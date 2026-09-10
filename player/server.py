@@ -141,8 +141,9 @@ def main():
     print(f"[Signal Player] [OK] DB snapshot at {db_path}")
 
     try:
-        from db import open_db
+        from db import open_db, set_active_db
         signal_db_conn, signal_db_cur = open_db(db_path, key)
+        set_active_db(signal_db_conn, signal_db_cur)
     except Exception as e:
         print(f"[Error] {e}", file=sys.stderr)
         sys.exit(1)
@@ -219,8 +220,10 @@ def main():
         with _cache_lock:
             _cache.clear()
         try:
-            if signal_db_conn:
-                signal_db_conn.close()
+            import db.queries as db_q
+            with db_q._db_lock:
+                if db_q._db_conn:
+                    db_q._db_conn.close()
         except Exception:
             pass
         # Record session timestamp so new videos arriving next time are detected

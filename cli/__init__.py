@@ -153,6 +153,15 @@ def main():
                 ts_str = ts if ts else "Unknown"
                 print(f"{ts_str:<19} | {chat:<18} | {ctype:<16} | {size_str:<9} | {name_str}")
             print(f"\nTotal attachments found: {len(rows)}")
+        elif args.sql:
+            cur.execute(args.sql)
+            rows = cur.fetchall()
+            if cur.description:
+                cols = [d[0] for d in cur.description]
+                print(" | ".join(cols))
+                print("-" * (sum(len(c) for c in cols) + 3 * len(cols)))
+            for r in rows:
+                print(" | ".join(str(item) for item in r))
         elif args.export_media:
             print("Export media functionality not yet implemented in CLI")
         else:
