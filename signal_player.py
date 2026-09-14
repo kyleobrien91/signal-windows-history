@@ -438,11 +438,16 @@ def main():
                 _set_sync_status(True, pending=total_pending, initial=total_pending)
                 print(f"[Background Sync] Started background download of {total_pending} pending videos across {len(pending_groups)} groups.")
 
-                run_headless_download(db_path, key, cdp_port=9222, wait_seconds=10)
+                run_res = run_headless_download(db_path, key, cdp_port=9222, wait_seconds=10)
 
-                reload_db(key)
-                _set_sync_status(False, pending=0)
-                print("\n[Background Sync] [OK] Background media download completed and database refreshed!")
+                if run_res:
+                    reload_db(key)
+                    _set_sync_status(False, pending=0)
+                    print("\n[Background Sync] [OK] Background media download completed and database refreshed!")
+                else:
+                    _set_sync_status(False)
+                    err_msg = getattr(run_res, 'error_message', None) or 'incomplete download'
+                    print(f"[Background Sync] Notice: Background media download finished with incomplete items or error: {err_msg}")
             except Exception as e:
                 _set_sync_status(False)
                 print(f"[Background Sync] Error: {e}")

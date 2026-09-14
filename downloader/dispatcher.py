@@ -40,6 +40,11 @@ except ImportError:
     print("[Error] 'sqlcipher3' library required.", file=sys.stderr)
     sys.exit(1)
 
+try:
+    from downloader.results import DownloadResult, GroupDownloadResult, ItemResultStatus
+except ImportError:
+    from results import DownloadResult, GroupDownloadResult, ItemResultStatus
+
 
 def get_cdp_target(port: int = 9222) -> dict:
     """Finds the main Signal Desktop application page target over CDP."""
@@ -122,16 +127,25 @@ async def _evaluate_cdp(ws, expr: str, timeout: float = 10.0):
     return {"error": f"Timeout ({timeout}s) waiting for CDP evaluation"}
 
 
-async def _trigger_group_download(ws_url: str, groups: List[Tuple[str, str, int]], db_path: str, key: str, poll_interval: int = 4, max_idle_rounds: int = 8):
+async def _trigger_group_download(ws_url: str, groups: List[Tuple[str, str, int]], db_path: str, key: str, poll_interval: int = 4, max_idle_rounds: int = 8) -> DownloadResult:
     """Iterates through groups, invokes handleReadAndDownloadAttachments over CDP, and polls progress."""
     print(f"[Headless Downloader] Connecting to Signal via WebSocket: {ws_url}")
+    group_results: List[GroupDownloadResult] = []
+    initial_pending = sum(g[2] for g in groups)
+
     async with websockets.connect(ws_url) as ws:
         # Verify window.ConversationController is accessible
         check_expr = "Boolean(window.ConversationController && window.ConversationController.get)"
         has_controller = await _evaluate_cdp(ws, check_expr)
         if not has_controller:
             print("[Headless Downloader] Warning: window.ConversationController not yet initialized in Signal.")
-            return False
+            return DownloadResult(
+                success=False,
+                status=ItemResultStatus.FAILED,
+                initial_pending=initial_pending,
+                pending_remaining=initial_pending,
+                error_message="window.ConversationController not yet initialized in Signal."
+            )
 
         print(f"[Headless Downloader] Triggering background downloads for {len(groups)} group(s)...")
         for idx, (convo_id, title, pending_count) in enumerate(groups, 1):
@@ -153,23 +167,39 @@ async def _trigger_group_download(ws_url: str, groups: List[Tuple[str, str, int]
             }})()
             """
             result = await _evaluate_cdp(ws, trigger_js)
-            if isinstance(result, dict) and result.get("success"):
+            is_ok = (result is True) or (isinstance(result, dict) and bool(result.get("success")))
+            if is_ok:
                 print(f"       -> [OK] Download job dispatched")
+                group_results.append(GroupDownloadResult(
+                    conversation_id=convo_id,
+                    title=title,
+                    pending_count=pending_count,
+                    status=ItemResultStatus.SUCCESS
+                ))
             else:
+                err_text = result.get("error") if isinstance(result, dict) else str(result)
                 print(f"       -> [Notice] {result}")
+                group_results.append(GroupDownloadResult(
+                    conversation_id=convo_id,
+                    title=title,
+                    pending_count=pending_count,
+                    status=ItemResultStatus.FAILED,
+                    error=err_text
+                ))
 
         print("\n[Headless Downloader] All download jobs dispatched. Monitoring live progress...")
         print("  Press Ctrl+C at any time to finish with currently downloaded videos.\n")
 
-        initial_pending = sum(g[2] for g in groups)
         last_pending = initial_pending
+        current_pending = initial_pending
         idle_count = 0
+
+        dispatch_failures = [g for g in group_results if g.status == ItemResultStatus.FAILED]
 
         try:
             while True:
                 await asyncio.sleep(poll_interval)
                 # Query fresh database snapshot to observe Signal Desktop's live download progress
-                current_groups = None
                 poll_path = None
                 try:
                     try:
@@ -201,24 +231,50 @@ async def _trigger_group_download(ws_url: str, groups: List[Tuple[str, str, int]
 
                 if current_pending == 0:
                     print(f"\n[Headless Downloader] [OK] All {initial_pending} videos have downloaded successfully!\n")
-                    break
+                    overall_success = (len(dispatch_failures) == 0)
+                    overall_status = ItemResultStatus.SUCCESS if overall_success else ItemResultStatus.FAILED
+                    err_msg = None if overall_success else f"{len(dispatch_failures)} group dispatch job(s) failed"
+                    return DownloadResult(
+                        success=overall_success,
+                        status=overall_status,
+                        groups=group_results,
+                        initial_pending=initial_pending,
+                        pending_remaining=0,
+                        downloaded_count=initial_pending,
+                        error_message=err_msg
+                    )
 
                 if current_pending == last_pending:
                     idle_count += 1
                     if idle_count >= max_idle_rounds:
                         print(f"\n[Headless Downloader] No new downloads for {poll_interval * max_idle_rounds}s. Proceeding with currently completed media.\n")
-                        break
+                        return DownloadResult(
+                            success=False,
+                            status=ItemResultStatus.TIMEOUT,
+                            groups=group_results,
+                            initial_pending=initial_pending,
+                            pending_remaining=current_pending,
+                            downloaded_count=initial_pending - current_pending,
+                            error_message=f"Download timed out with {current_pending} pending video(s) remaining"
+                        )
                 else:
                     idle_count = 0
                     last_pending = current_pending
 
         except (asyncio.CancelledError, KeyboardInterrupt):
             print("\n[Headless Downloader] Download monitoring interrupted by user. Proceeding to player...")
+            return DownloadResult(
+                success=False,
+                status=ItemResultStatus.CANCELLED,
+                groups=group_results,
+                initial_pending=initial_pending,
+                pending_remaining=current_pending,
+                downloaded_count=initial_pending - current_pending,
+                error_message="Download monitoring interrupted by user"
+            )
 
-        return True
 
-
-def run_headless_download(db_path: str, key: str, cdp_port: int = 9222, wait_seconds: int = 15) -> bool:
+def run_headless_download(db_path: str, key: str, cdp_port: int = 9222, wait_seconds: int = 15) -> DownloadResult:
     """
     Main entrypoint for programmatic headless downloads.
     Called from signal_player.py or CLI.
@@ -228,30 +284,49 @@ def run_headless_download(db_path: str, key: str, cdp_port: int = 9222, wait_sec
         print(f"\n[Headless Downloader] Could not connect to Signal on port {cdp_port}.", file=sys.stderr)
         print("  Make sure Signal was started with remote debugging enabled:", file=sys.stderr)
         print(r'  Start-Process "$env:LOCALAPPDATA\Programs\signal-desktop\Signal.exe" -ArgumentList "--remote-debugging-port=9222"' + "\n", file=sys.stderr)
-        return False
+        return DownloadResult(
+            success=False,
+            status=ItemResultStatus.FAILED,
+            error_message=f"Could not connect to Signal on port {cdp_port}"
+        )
 
     ws_url = target.get("webSocketDebuggerUrl")
     if not ws_url:
         print("[Headless Downloader] Error: No webSocketDebuggerUrl returned by CDP endpoint.", file=sys.stderr)
-        return False
+        return DownloadResult(
+            success=False,
+            status=ItemResultStatus.FAILED,
+            error_message="No webSocketDebuggerUrl returned by CDP endpoint"
+        )
 
     # 1. Discover pending video groups from SQLCipher
     try:
         pending_groups = query_pending_video_groups(db_path, key)
     except Exception as e:
         print(f"[Headless Downloader] Error: Failed to query pending videos: {e}", file=sys.stderr)
-        return False
+        return DownloadResult(
+            success=False,
+            status=ItemResultStatus.FAILED,
+            error_message=f"Failed to query pending videos: {e}",
+            exception=e
+        )
 
     if not pending_groups:
         print("[Headless Downloader] [OK] No pending videos found in any group. Everything is downloaded!")
-        return True
+        return DownloadResult(
+            success=True,
+            status=ItemResultStatus.SKIPPED,
+            initial_pending=0,
+            pending_remaining=0,
+            downloaded_count=0
+        )
 
     total_pending = sum(g[2] for g in pending_groups)
     print(f"[Headless Downloader] Found {total_pending} pending videos across {len(pending_groups)} group(s).")
 
     # 2. Run async CDP dispatch & live database progress monitoring
-    success = asyncio.run(_trigger_group_download(ws_url, pending_groups, db_path, key))
-    return success
+    result = asyncio.run(_trigger_group_download(ws_url, pending_groups, db_path, key))
+    return result
 
 
 if __name__ == "__main__":
@@ -267,8 +342,10 @@ if __name__ == "__main__":
     print("[Headless Downloader] Initializing...")
     key = get_signal_key()
     db_path = copy_db_snapshot()
-    ok = run_headless_download(db_path, key, cdp_port=args.port, wait_seconds=args.wait)
-    if ok:
+    res = run_headless_download(db_path, key, cdp_port=args.port, wait_seconds=args.wait)
+    if res:
         print("[Headless Downloader] Completed.")
+        sys.exit(0)
     else:
+        print(f"[Headless Downloader] Operation failed or incomplete: {getattr(res, 'error_message', 'non-zero pending items')}", file=sys.stderr)
         sys.exit(1)

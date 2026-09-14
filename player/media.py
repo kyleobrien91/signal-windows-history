@@ -6,6 +6,7 @@ for player/server.py and signal_player.py without importing HTTP server modules 
 """
 
 import os
+import sys
 from typing import Optional, Tuple, Union
 
 from crypto.attachment import inspect_attachment, stream_attachment_range
@@ -103,7 +104,10 @@ def serve_encrypted_media(
         declared_size: Optional declared attachment size.
         content_type: Content-Type header value.
     """
+    file_id = os.path.basename(enc_path) or "unknown_attachment"
+
     if not os.path.exists(enc_path):
+        sys.stderr.write(f"[Media Stream Error] Attachment file missing: {file_id}\n")
         handler.send_error(404, "Encrypted file missing from attachments")
         return
 
@@ -111,9 +115,11 @@ def serve_encrypted_media(
     try:
         total_length = inspect_attachment(enc_path, local_key_b64, declared_size)
     except ValueError as e:
+        sys.stderr.write(f"[Media Stream Error] Decryption/validation error for {file_id}: {e}\n")
         handler.send_error(400, f"Decryption/validation error: {e}")
         return
     except Exception as e:
+        sys.stderr.write(f"[Media Stream Error] Server error inspecting {file_id}: {type(e).__name__}\n")
         handler.send_error(500, f"Internal server error: {e}")
         return
 
@@ -139,8 +145,11 @@ def serve_encrypted_media(
         handler.end_headers()
 
         if total_length > 0:
-            for chunk in stream_attachment_range(enc_path, local_key_b64, 0, total_length - 1, declared_size):
-                handler.wfile.write(chunk)
+            try:
+                for chunk in stream_attachment_range(enc_path, local_key_b64, 0, total_length - 1, declared_size):
+                    handler.wfile.write(chunk)
+            except Exception as e:
+                sys.stderr.write(f"[Media Stream Error] Streaming interrupted for {file_id}: {type(e).__name__}\n")
 
     elif status == 206:
         start, end = bounds
@@ -154,5 +163,8 @@ def serve_encrypted_media(
         handler.end_headers()
 
         if range_length > 0:
-            for chunk in stream_attachment_range(enc_path, local_key_b64, start, end, declared_size):
-                handler.wfile.write(chunk)
+            try:
+                for chunk in stream_attachment_range(enc_path, local_key_b64, start, end, declared_size):
+                    handler.wfile.write(chunk)
+            except Exception as e:
+                sys.stderr.write(f"[Media Stream Error] Range streaming interrupted for {file_id}: {type(e).__name__}\n")
