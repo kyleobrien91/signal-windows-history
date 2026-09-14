@@ -65,6 +65,7 @@ def query_pending_video_groups(db_path: str, key: str) -> List[Tuple[str, str, i
     Connects to Signal SQLCipher snapshot and returns groups with pending videos:
     [(conversationId, groupName, pending_count), ...]
     """
+    conn = None
     try:
         conn = sqlcipher3.connect(db_path)
         cur = conn.cursor()
@@ -85,10 +86,10 @@ def query_pending_video_groups(db_path: str, key: str) -> List[Tuple[str, str, i
             ORDER BY pending_cnt DESC;
         """)
         rows = cur.fetchall()
-        conn.close()
         return [(r[0], r[1], r[2]) for r in rows]
-    except Exception as e:
-        return []
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 async def _evaluate_cdp(ws, expr: str, timeout: float = 10.0):
@@ -168,17 +169,28 @@ async def _trigger_group_download(ws_url: str, groups: List[Tuple[str, str, int]
             while True:
                 await asyncio.sleep(poll_interval)
                 # Query fresh database snapshot to observe Signal Desktop's live download progress
+                current_groups = None
+                poll_path = None
                 try:
-                    from db import copy_db_snapshot
-                    poll_path = copy_db_snapshot()
-                    current_groups = query_pending_video_groups(poll_path, key)
                     try:
-                        shutil.rmtree(os.path.dirname(poll_path), ignore_errors=True)
-                    except Exception:
-                        pass
-                except Exception:
-                    # Fallback to current db_path if taking snapshot fails
-                    current_groups = query_pending_video_groups(db_path, key)
+                        from db import copy_db_snapshot
+                        poll_path = copy_db_snapshot()
+                    except Exception as snap_err:
+                        print(f"\n[Headless Downloader] Warning: Snapshot creation failed ({snap_err}), falling back to direct db_path", file=sys.stderr)
+
+                    if poll_path:
+                        try:
+                            current_groups = query_pending_video_groups(poll_path, key)
+                        finally:
+                            try:
+                                shutil.rmtree(os.path.dirname(poll_path), ignore_errors=True)
+                            except Exception:
+                                pass
+                    else:
+                        current_groups = query_pending_video_groups(db_path, key)
+                except Exception as query_err:
+                    print(f"\n[Headless Downloader] Warning: Polling query failed: {query_err}", file=sys.stderr)
+                    continue
 
                 current_pending = sum(g[2] for g in current_groups)
                 downloaded = initial_pending - current_pending
@@ -224,7 +236,12 @@ def run_headless_download(db_path: str, key: str, cdp_port: int = 9222, wait_sec
         return False
 
     # 1. Discover pending video groups from SQLCipher
-    pending_groups = query_pending_video_groups(db_path, key)
+    try:
+        pending_groups = query_pending_video_groups(db_path, key)
+    except Exception as e:
+        print(f"[Headless Downloader] Error: Failed to query pending videos: {e}", file=sys.stderr)
+        return False
+
     if not pending_groups:
         print("[Headless Downloader] [OK] No pending videos found in any group. Everything is downloaded!")
         return True
