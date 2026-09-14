@@ -30,6 +30,8 @@ except ImportError:
     print("Error: 'cryptography' library required. pip install cryptography", file=sys.stderr)
     sys.exit(1)
 
+from crypto.attachment import inspect_attachment, stream_attachment_range, decrypt_attachment
+
 
 # ---------------------------------------------------------------------------
 # Windows DPAPI + Signal Key Extraction

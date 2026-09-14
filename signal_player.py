@@ -265,44 +265,8 @@ class _Handler(BaseHTTPRequestHandler):
         rel_path, local_key, size, content_type = entry
         enc_path = os.path.join(_attach_root, rel_path)
 
-        if not os.path.exists(enc_path):
-            self.send_error(404, "Encrypted file missing from attachments.noindex")
-            return
-
-        try:
-            data = _get_cached(msg_id, enc_path, local_key, size)
-        except Exception as e:
-            self.send_error(500, f"Decryption error: {e}")
-            return
-
-        total        = len(data)
-        range_header = self.headers.get('Range')
-
-        if range_header:
-            try:
-                spec         = range_header.strip().replace('bytes=', '')
-                s_str, e_str = spec.split('-')
-                start = int(s_str) if s_str else 0
-                end   = int(e_str) if e_str else total - 1
-                end   = min(end, total - 1)
-                chunk = data[start:end + 1]
-
-                self.send_response(206)
-                self.send_header('Content-Type',   content_type)
-                self.send_header('Content-Range',  f'bytes {start}-{end}/{total}')
-                self.send_header('Content-Length', len(chunk))
-                self.send_header('Accept-Ranges',  'bytes')
-                self.end_headers()
-                self.wfile.write(chunk)
-            except Exception as e:
-                self.send_error(400, f"Bad Range header: {e}")
-        else:
-            self.send_response(200)
-            self.send_header('Content-Type',   content_type)
-            self.send_header('Content-Length', total)
-            self.send_header('Accept-Ranges',  'bytes')
-            self.end_headers()
-            self.wfile.write(data)
+        from player.media import serve_encrypted_media
+        serve_encrypted_media(self, enc_path, local_key, size, content_type)
 
 
 # ---------------------------------------------------------------------------
