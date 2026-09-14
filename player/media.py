@@ -42,12 +42,6 @@ def parse_range_header(range_header: Optional[str], total_length: int) -> Tuple[
 
     s_str, e_str = parts[0].strip(), parts[1].strip()
 
-    # Special case: bytes=-0 (suffix length 0) or total_length == 0
-    if s_str == "" and e_str == "0":
-        if total_length == 0:
-            return 416, None
-        return 206, (total_length, total_length - 1)  # Zero bytes requested from end
-
     if total_length == 0:
         return 416, None
 
@@ -55,11 +49,8 @@ def parse_range_header(range_header: Optional[str], total_length: int) -> Tuple[
         # Suffix range: -length
         try:
             length = int(e_str)
-            if length < 0:
+            if length <= 0:
                 return 400, None
-            if length == 0:
-                # Suffix length 0: range [total_length, total_length-1] (length 0)
-                return 206, (total_length, total_length - 1)
             start = max(0, total_length - length)
             end = total_length - 1
             return 206, (start, end)

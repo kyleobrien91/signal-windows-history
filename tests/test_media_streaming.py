@@ -201,6 +201,9 @@ def test_parse_range_header():
     # Out of bounds
     assert parse_range_header("bytes=1000-1500", total) == (416, None)
 
+    # Suffix -0 (length 0) is malformed/unsatisfiable
+    assert parse_range_header("bytes=-0", total) == (400, None)
+
     # Malformed syntax / inverted bounds
     assert parse_range_header("bytes=500-400", total) == (400, None)
     assert parse_range_header("bytes=abc-def", total) == (400, None)
