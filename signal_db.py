@@ -8,10 +8,11 @@ queries for conversations and attachments.
 """
 
 import os
-import shutil
 import sys
+import tempfile
 import threading
 import time
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 try:
@@ -20,6 +21,7 @@ except ImportError:
     print("Error: 'sqlcipher3' library required. pip install sqlcipher3", file=sys.stderr)
     sys.exit(1)
 
+from signal_crypto import get_signal_key
 from signal_meta import _get_meta, _meta_data, _meta_lock
 
 _db_conn = None
@@ -27,41 +29,55 @@ _db_cur  = None
 _db_lock = threading.Lock()
 
 
+def _snapshot_dir() -> str:
+    """Create a fresh work directory for a snapshot copy."""
+    temp_root = os.environ.get("TEMP", ".")
+    return tempfile.mkdtemp(prefix="signal-player-work-", dir=temp_root)
+
+
 def copy_db_snapshot() -> str:
-    """
-    Safely copies db.sqlite, db.sqlite-wal, and db.sqlite-shm to a temporary directory.
-    Uses timestamped subdirectories to prevent Windows file-lock collisions.
-    """
+    """Create a consistent SQLite snapshot of Signal's live SQLCipher DB."""
     appdata = os.environ.get("APPDATA", "")
-    src     = os.path.join(appdata, "Signal", "sql")
-    dst_dir = os.path.join(os.environ.get("TEMP", "."), f"signal-player-work-{int(time.time()*1000)}")
-    os.makedirs(dst_dir, exist_ok=True)
-
-    db_src  = os.path.join(src, "db.sqlite")
-    wal_src = os.path.join(src, "db.sqlite-wal")
-    shm_src = os.path.join(src, "db.sqlite-shm")
-    db_dst  = os.path.join(dst_dir, "db.sqlite")
-    wal_dst = os.path.join(dst_dir, "db.sqlite-wal")
-    shm_dst = os.path.join(dst_dir, "db.sqlite-shm")
-
+    src = os.path.join(appdata, "Signal", "sql")
+    db_src = os.path.join(src, "db.sqlite")
     if not os.path.exists(db_src):
         raise FileNotFoundError(f"Signal DB not found: {db_src}")
+
+    key = get_signal_key()
+    dst_dir = _snapshot_dir()
+    db_dst = os.path.join(dst_dir, "db.sqlite")
 
     max_retries = 5
     for attempt in range(max_retries):
         try:
-            if os.path.exists(shm_src):
-                shutil.copy2(shm_src, shm_dst)
-            if os.path.exists(wal_src):
-                shutil.copy2(wal_src, wal_dst)
-            shutil.copy2(db_src, db_dst)
-            break
+            source_uri = f"{Path(db_src).resolve().as_uri()}?mode=ro"
+            src_conn = sqlcipher3.connect(source_uri, uri=True)
+            try:
+                src_conn.execute(f"PRAGMA key = \"x'{key}'\";")
+                src_conn.execute("PRAGMA cipher_compatibility = 4;")
+                src_conn.execute("PRAGMA query_only = ON;")
+
+                dst_conn = sqlcipher3.connect(db_dst)
+                try:
+                    dst_conn.execute(f"PRAGMA key = \"x'{key}'\";")
+                    dst_conn.execute("PRAGMA cipher_compatibility = 4;")
+                    src_conn.backup(dst_conn)
+                finally:
+                    dst_conn.close()
+            finally:
+                src_conn.close()
+            return db_dst
         except Exception:
+            if os.path.exists(db_dst):
+                try:
+                    os.remove(db_dst)
+                except OSError:
+                    pass
             if attempt == max_retries - 1:
                 raise
             time.sleep(0.3)
 
-    return db_dst
+    raise RuntimeError("Failed to create a consistent database snapshot")
 
 
 def open_db(db_path: str, key: str):

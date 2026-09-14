@@ -1,56 +1,74 @@
 #!/usr/bin/env python3
-"""
-db/snapshot.py - Safe snapshot copying of Signal Desktop database.
+"""db/snapshot.py - Safe snapshotting of the Signal Desktop database.
 
-Copies db.sqlite, db.sqlite-wal, and db.sqlite-shm to a timestamped
-temporary directory with retry logic for file-lock handling.
+The project previously copied db.sqlite, db.sqlite-wal, and db.sqlite-shm as
+independent files. Because Signal uses SQLite/WAL semantics, that can create a
+mixed snapshot whose files are not from one consistent transaction. Copying the
+live DB via SQLite's backup API preserves a coherent point-in-time view while
+still allowing callers to keep the same `copy_db_snapshot()` API.
 """
 
 import os
-import shutil
+import tempfile
 import time
+from pathlib import Path
+
+from crypto import get_signal_key
+
+
+def _snapshot_dir() -> str:
+    """Create a fresh work directory for a snapshot copy."""
+    temp_root = os.environ.get("TEMP", ".")
+    return tempfile.mkdtemp(prefix="signal-player-work-", dir=temp_root)
 
 
 def copy_db_snapshot() -> str:
-    """
-    Safely copies db.sqlite, db.sqlite-wal, and db.sqlite-shm to a
-    timestamped temporary directory.
+    """Create a consistent SQLite snapshot of Signal's live SQLCipher DB.
 
-    Uses APPDATA for Signal database location and a timestamped subdirectory
-    under TEMP to prevent Windows file-lock collisions.
-
-    Retry logic: 5 attempts with 0.3s sleep between attempts.
-
-    Returns:
-        str: Path to the copied db.sqlite file.
+    We open the live database in read-only mode and back it up into a new file.
+    SQLite's backup API captures a single consistent database state, even when the
+    main database and WAL are changing concurrently.
     """
     appdata = os.environ.get("APPDATA", "")
     src = os.path.join(appdata, "Signal", "sql")
-    dst_dir = os.path.join(os.environ.get("TEMP", "."), f"signal-player-work-{int(time.time()*1000)}")
-    os.makedirs(dst_dir, exist_ok=True)
-
     db_src = os.path.join(src, "db.sqlite")
-    wal_src = os.path.join(src, "db.sqlite-wal")
-    shm_src = os.path.join(src, "db.sqlite-shm")
-    db_dst = os.path.join(dst_dir, "db.sqlite")
-    wal_dst = os.path.join(dst_dir, "db.sqlite-wal")
-    shm_dst = os.path.join(dst_dir, "db.sqlite-shm")
-
     if not os.path.exists(db_src):
         raise FileNotFoundError(f"Signal DB not found: {db_src}")
+
+    key = get_signal_key()
+    dst_dir = _snapshot_dir()
+    db_dst = os.path.join(dst_dir, "db.sqlite")
+
+    import sqlcipher3
 
     max_retries = 5
     for attempt in range(max_retries):
         try:
-            if os.path.exists(shm_src):
-                shutil.copy2(shm_src, shm_dst)
-            if os.path.exists(wal_src):
-                shutil.copy2(wal_src, wal_dst)
-            shutil.copy2(db_src, db_dst)
-            break
+            source_uri = f"{Path(db_src).resolve().as_uri()}?mode=ro"
+            src_conn = sqlcipher3.connect(source_uri, uri=True)
+            try:
+                src_conn.execute(f"PRAGMA key = \"x'{key}'\";")
+                src_conn.execute("PRAGMA cipher_compatibility = 4;")
+                src_conn.execute("PRAGMA query_only = ON;")
+
+                dst_conn = sqlcipher3.connect(db_dst)
+                try:
+                    dst_conn.execute(f"PRAGMA key = \"x'{key}'\";")
+                    dst_conn.execute("PRAGMA cipher_compatibility = 4;")
+                    src_conn.backup(dst_conn)
+                finally:
+                    dst_conn.close()
+            finally:
+                src_conn.close()
+            return db_dst
         except Exception:
+            if os.path.exists(db_dst):
+                try:
+                    os.remove(db_dst)
+                except OSError:
+                    pass
             if attempt == max_retries - 1:
                 raise
             time.sleep(0.3)
 
-    return db_dst
+    raise RuntimeError("Failed to create a consistent database snapshot")

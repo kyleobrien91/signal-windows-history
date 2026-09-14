@@ -13,8 +13,10 @@ import hmac
 import json
 import mimetypes
 import os
-import shutil
 import sys
+import tempfile
+import time
+from pathlib import Path
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -117,27 +119,48 @@ def get_signal_key() -> str:
 
 
 def copy_db_to_work_dir() -> str:
-    """
-    Copies db.sqlite and db.sqlite-wal to local %TEMP%\\signal-work.
-    NOTE: db.sqlite-shm is intentionally NOT copied while Signal is running
-    to prevent SQLite database lock contention.
-    """
+    """Create a consistent SQLCipher snapshot suitable for read-only analysis."""
     appdata = os.environ.get("APPDATA")
     src_dir = os.path.join(appdata, "Signal", "sql")
-    work_dir = os.path.join(os.environ.get("TEMP", "."), "signal-work")
-    os.makedirs(work_dir, exist_ok=True)
-
     db_src = os.path.join(src_dir, "db.sqlite")
-    wal_src = os.path.join(src_dir, "db.sqlite-wal")
-
     if not os.path.exists(db_src):
         raise FileNotFoundError(f"Signal database not found at {db_src}")
 
-    shutil.copy2(db_src, os.path.join(work_dir, "db.sqlite"))
-    if os.path.exists(wal_src):
-        shutil.copy2(wal_src, os.path.join(work_dir, "db.sqlite-wal"))
+    key = get_signal_key()
+    work_dir = tempfile.mkdtemp(prefix="signal-player-work-", dir=os.environ.get("TEMP", "."))
+    db_dst = os.path.join(work_dir, "db.sqlite")
 
-    return os.path.join(work_dir, "db.sqlite")
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            source_uri = f"{Path(db_src).resolve().as_uri()}?mode=ro"
+            src_conn = sqlcipher3.connect(source_uri, uri=True)
+            try:
+                src_conn.execute(f"PRAGMA key = \"x'{key}'\";")
+                src_conn.execute("PRAGMA cipher_compatibility = 4;")
+                src_conn.execute("PRAGMA query_only = ON;")
+
+                dst_conn = sqlcipher3.connect(db_dst)
+                try:
+                    dst_conn.execute(f"PRAGMA key = \"x'{key}'\";")
+                    dst_conn.execute("PRAGMA cipher_compatibility = 4;")
+                    src_conn.backup(dst_conn)
+                finally:
+                    dst_conn.close()
+            finally:
+                src_conn.close()
+            return db_dst
+        except Exception:
+            if os.path.exists(db_dst):
+                try:
+                    os.remove(db_dst)
+                except OSError:
+                    pass
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(0.3)
+
+    raise RuntimeError("Failed to create a consistent database snapshot")
 
 
 def open_db(db_path: str, key: str):
