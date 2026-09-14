@@ -34,6 +34,10 @@ def _get_cached(msg_id: str, enc_path: str, local_key: str, size: int) -> bytes:
             _cache.move_to_end(msg_id)
             return _cache[msg_id]
 
+    if not os.path.exists(enc_path):
+        file_id = os.path.basename(enc_path) or msg_id
+        raise FileNotFoundError(f"Attachment file missing: {file_id}")
+
     # Read encrypted data from file
     with open(enc_path, "rb") as fh:
         enc_data = fh.read()

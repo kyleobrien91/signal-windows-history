@@ -100,12 +100,19 @@ def _decrypt_blob(enc_path: str, local_key_b64: str, declared_size: int = None) 
     Decrypts an attachment encrypted with Signal's custom format:
     AES-256-CBC with HMAC-SHA256 verification.
     """
+    if not os.path.exists(enc_path):
+        file_id = os.path.basename(enc_path) or "unknown_attachment"
+        raise FileNotFoundError(f"Attachment file missing: {file_id}")
+
     raw_key = base64.b64decode(local_key_b64)
     aes_key = raw_key[:32]
     mac_key = raw_key[32:]
 
     with open(enc_path, "rb") as fh:
         enc_data = fh.read()
+
+    if len(enc_data) < 64:
+        raise ValueError("Invalid attachment file structure")
 
     iv   = enc_data[:16]
     body = enc_data[16:-32]
@@ -119,6 +126,9 @@ def _decrypt_blob(enc_path: str, local_key_b64: str, declared_size: int = None) 
     decryptor = cipher.decryptor()
     padded    = decryptor.update(body) + decryptor.finalize()
     pad_len   = padded[-1]
+    if pad_len < 1 or pad_len > 16 or padded[-pad_len:] != bytes([pad_len]) * pad_len:
+        raise ValueError("Invalid PKCS#7 padding in attachment.")
+
     plaintext = padded[:-pad_len]
 
     if declared_size and declared_size <= len(plaintext):
