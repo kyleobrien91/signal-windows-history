@@ -17,12 +17,6 @@ from db import (
     reload_db,
     set_active_db,
 )
-from db.queries import (
-    _get_conversation_map,
-    _query_groups,
-    _query_media,
-    _query_new_count,
-)
 
 
 class _SignalDBModule(sys.modules[__name__].__class__):
@@ -54,8 +48,6 @@ class _SignalDBModule(sys.modules[__name__].__class__):
 
 
 sys.modules[__name__].__class__ = _SignalDBModule
-
-_db_lock = sys.modules["db.queries"]._db_lock
 
 __all__ = [
     "copy_db_snapshot",
