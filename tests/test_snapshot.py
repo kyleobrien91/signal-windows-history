@@ -159,6 +159,19 @@ class TestDatabaseSnapshot(unittest.TestCase):
         self.assertEqual(FakeConnection.backup_calls, 1)
 
     @patch("db.snapshot.get_signal_key", return_value="a" * 64)
+    def test_unrelated_operational_error_subclass_not_retried(self, _mock_key):
+        class UnrelatedOperationalError(Exception):
+            pass
+
+        fail_spec = {"fail_count": 10, "exc": UnrelatedOperationalError("database is busy")}
+        fake_module = FakeSqlCipherModule(fail_backup_exc=fail_spec)
+        with patch.dict(sys.modules, {"sqlcipher3": fake_module}):
+            with self.assertRaises(UnrelatedOperationalError):
+                snapshot.copy_db_snapshot()
+
+        self.assertEqual(FakeConnection.backup_calls, 1)
+
+    @patch("db.snapshot.get_signal_key", return_value="a" * 64)
     def test_validation_failure_cleans_up_and_does_not_retry(self, _mock_key):
         fake_module = FakeSqlCipherModule(fail_validation=True)
         with patch.dict(sys.modules, {"sqlcipher3": fake_module}):

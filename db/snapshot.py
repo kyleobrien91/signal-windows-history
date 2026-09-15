@@ -25,14 +25,11 @@ def _snapshot_dir() -> str:
 def _is_busy_or_locked_error(exc: Exception, sqlcipher3_module) -> bool:
     """Check if exception represents a SQLite/SQLCipher BUSY or LOCKED transient error."""
     op_err_cls = getattr(sqlcipher3_module, "OperationalError", None)
-    if op_err_cls is not None and isinstance(exc, op_err_cls):
-        is_op = True
-    elif type(exc).__name__ in ("OperationalError", "DatabaseError"):
-        is_op = True
-    else:
-        is_op = False
+    db_err_cls = getattr(sqlcipher3_module, "DatabaseError", None)
 
-    if not is_op:
+    valid_classes = tuple(cls for cls in (op_err_cls, db_err_cls) if cls is not None)
+
+    if not valid_classes or not isinstance(exc, valid_classes):
         return False
 
     SQLITE_BUSY = 5

@@ -195,6 +195,54 @@ class TestMediaFailures(unittest.TestCase):
         self.assertIn("abc123.bin", err_msg)
         self.assertNotIn("secret_user_john_doe", err_msg)
 
+    def test_integration_post_header_stream_failure_terminates_socket(self):
+        import http.client
+        from http.client import RemoteDisconnected
+        import threading
+        from http.server import ThreadingHTTPServer
+
+        plaintext = b"X" * 100000
+        enc_data = make_encrypted_attachment(plaintext, self.key_b64)
+
+        with tempfile.NamedTemporaryFile(suffix="_realhttp.bin", delete=False) as f:
+            f.write(enc_data)
+            enc_path = f.name
+
+        def failing_stream(*args, **kwargs):
+            yield b"X" * 1024
+            raise RuntimeError("Mid-stream connection failure")
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), ServerHandler)
+        port = server.server_port
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+
+        msg_id = "integration_test_msg"
+        media_entry = (enc_path, self.key_b64, len(plaintext), "video/mp4")
+
+        with _lookup_lock:
+            _media_lookup[msg_id] = media_entry
+
+        try:
+            with patch("player.media.stream_attachment_range", side_effect=failing_stream):
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                conn.request("GET", f"/stream/{msg_id}")
+                resp = conn.getresponse()
+
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.getheader("Content-Length"), "100000")
+
+                with self.assertRaises((http.client.IncompleteRead, ConnectionResetError, RemoteDisconnected)):
+                    resp.read()
+
+                conn.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            os.unlink(enc_path)
+            with _lookup_lock:
+                _media_lookup.pop(msg_id, None)
+
     def test_get_cached_missing_file_raises_sanitized_error(self):
         with self.assertRaises(FileNotFoundError) as ctx:
             crypto_key._get_cached("msg_1", self.sensitive_user_path, self.key_b64, 100)
