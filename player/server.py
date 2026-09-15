@@ -32,21 +32,19 @@ WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 def is_signal_running() -> bool:
     """Checks if Signal.exe is currently running on Windows."""
     try:
-        out = subprocess.check_output(
-            ["tasklist", "/FI", "IMAGENAME eq Signal.exe", "/FO", "CSV", "/NH"],
-            text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-        )
-        return "signal.exe" in out.lower()
+        from downloader.dispatcher import is_signal_running as _is_running
+        return _is_running()
     except Exception:
         return False
 
 
 def kill_signal():
-    """Terminates running Signal.exe processes."""
+    """Terminates running Signal.exe processes safely by targeted process IDs."""
     try:
-        subprocess.run(["taskkill", "/F", "/IM", "Signal.exe"], capture_output=True)
-        time.sleep(1)
+        from downloader.dispatcher import get_signal_pids, safely_stop_signal_processes
+        pids = get_signal_pids()
+        if pids:
+            safely_stop_signal_processes(pids)
     except Exception as e:
         print(f"[Signal Player] Warning: failed to terminate Signal: {e}")
 

@@ -52,17 +52,81 @@ except ImportError:
     PLAYER_EXE_PATH = os.path.expandvars(r"%LOCALAPPDATA%\Programs\signal-desktop\Signal.exe")
 
 
-def is_signal_running() -> bool:
-    """Checks if Signal.exe is currently running on Windows."""
+def get_signal_pids() -> List[int]:
+    """Returns list of process IDs for running Signal.exe processes on Windows."""
     try:
         out = subprocess.check_output(
             ["tasklist", "/FI", "IMAGENAME eq Signal.exe", "/FO", "CSV", "/NH"],
             text=True,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         )
-        return "signal.exe" in out.lower()
+        pids = []
+        for line in out.strip().splitlines():
+            parts = [p.strip('"') for p in line.split('","')]
+            if len(parts) >= 2 and parts[0].lower() == "signal.exe":
+                try:
+                    pids.append(int(parts[1]))
+                except ValueError:
+                    pass
+        return pids
     except Exception:
+        return []
+
+
+def is_signal_running() -> bool:
+    """Checks if Signal.exe is currently running on Windows."""
+    return len(get_signal_pids()) > 0
+
+
+def safely_stop_signal_processes(pids: Optional[List[int]] = None, timeout: float = 5.0) -> bool:
+    """Terminates specific Signal process PIDs safely and verifies they have exited."""
+    if pids is None:
+        pids = get_signal_pids()
+    if not pids:
+        return True
+
+    for pid in pids:
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/F"],
+                capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            )
+        except Exception as e:
+            print(f"[Downloader] Warning: failed to terminate Signal PID {pid}: {e}", file=sys.stderr)
+
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        remaining = [p for p in pids if p in get_signal_pids()]
+        if not remaining:
+            return True
+        time.sleep(0.3)
+
+    return len(get_signal_pids()) == 0
+
+
+def verify_cdp_port_owner(port: int, expected_pid: int) -> bool:
+    """Verifies via netstat that the given CDP port is being listened to by expected_pid."""
+    try:
+        out = subprocess.check_output(
+            ["netstat", "-ano"],
+            text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        )
+        port_str = f":{port}"
+        for line in out.splitlines():
+            if port_str in line and "LISTENING" in line:
+                parts = line.strip().split()
+                if len(parts) >= 5:
+                    try:
+                        pid = int(parts[-1])
+                        if pid == expected_pid:
+                            return True
+                    except ValueError:
+                        pass
         return False
+    except Exception:
+        return True
 
 
 def get_signal_exe_path() -> str:
@@ -75,8 +139,11 @@ def get_signal_exe_path() -> str:
 def start_managed_signal_cdp(cdp_port: int = 9222, timeout: float = 15.0) -> Tuple[Optional[subprocess.Popen], Optional[str]]:
     """
     Launches a dedicated Signal.exe process with CDP remote debugging enabled.
-    Tracks exact process instance handle (PID).
+    Verifies CDP endpoint ownership before returning.
     """
+    if get_cdp_target(cdp_port) is not None:
+        return None, f"Port {cdp_port} is already in use by an unmanaged CDP endpoint"
+
     sig_exe = get_signal_exe_path()
     try:
         proc = subprocess.Popen(
@@ -92,17 +159,18 @@ def start_managed_signal_cdp(cdp_port: int = 9222, timeout: float = 15.0) -> Tup
             return None, f"Signal process terminated unexpectedly (exit code {proc.returncode})"
         target = get_cdp_target(cdp_port)
         if target and target.get("webSocketDebuggerUrl"):
-            return proc, None
+            if verify_cdp_port_owner(cdp_port, proc.pid):
+                return proc, None
         time.sleep(0.5)
 
-    stop_managed_signal_cdp(proc, relaunch_normal=False)
-    return None, f"Timed out waiting for CDP endpoint on port {cdp_port}"
+    stop_managed_signal_cdp(proc, relaunch_normal=False, cdp_port=cdp_port)
+    return None, f"Timed out waiting for verified CDP endpoint on port {cdp_port}"
 
 
-def stop_managed_signal_cdp(proc: Optional[subprocess.Popen], relaunch_normal: bool = True):
+def stop_managed_signal_cdp(proc: Optional[subprocess.Popen], relaunch_normal: bool = True, cdp_port: int = 9222):
     """
     Terminates the specific Signal process instance launched for CDP (using exact process handle).
-    Optionally relaunches Signal normally without CDP flags to restore the user session.
+    Verifies that the CDP endpoint is no longer reachable before optionally relaunching Signal.
     """
     if proc is not None:
         try:
@@ -115,6 +183,12 @@ def stop_managed_signal_cdp(proc: Optional[subprocess.Popen], relaunch_normal: b
                     proc.wait(timeout=1)
         except Exception as e:
             print(f"[Downloader] Warning: Error terminating CDP process {proc.pid}: {e}", file=sys.stderr)
+
+    t0 = time.time()
+    while time.time() - t0 < 3.0:
+        if get_cdp_target(cdp_port) is None:
+            break
+        time.sleep(0.2)
 
     if relaunch_normal:
         try:
@@ -151,9 +225,6 @@ class RateEstimator:
 
         if dt > 0 and dp > 0:
             rate = dp / dt
-        elif downloaded > 0 and (t_last - self.samples[0][0]) > 0:
-            total_dt = t_last - self.samples[0][0]
-            rate = downloaded / total_dt
         else:
             rate = 0.0
 
@@ -171,7 +242,7 @@ class RateEstimator:
         elif current_pending == 0:
             return rate, 0.0, "ETA 00:00"
         else:
-            return rate, None, "ETA calculating..."
+            return 0.0, None, "ETA calculating..."
 
 
 def get_cdp_target(port: int = 9222) -> dict:

@@ -257,6 +257,17 @@ class TestRateEstimatorAndProgress(unittest.TestCase):
         self.assertEqual(eta_sec, 0.0)
         self.assertEqual(eta_str, "ETA 00:00")
 
+    def test_rate_estimator_stalled_window_returns_zero_rate_and_calculating_eta(self):
+        estimator = dispatcher.RateEstimator(window_seconds=15.0)
+        estimator.add_sample(100.0, 50)
+        estimator.add_sample(105.0, 40)
+        # Stalled for 20 seconds, old samples drop out of 15s window
+        estimator.add_sample(125.0, 40)
+        rate, eta_sec, eta_str = estimator.get_rate_and_eta(50, 40)
+        self.assertEqual(rate, 0.0)
+        self.assertIsNone(eta_sec)
+        self.assertEqual(eta_str, "ETA calculating...")
+
 
 class TestManagedDownloadLifecycle(unittest.TestCase):
 
@@ -274,6 +285,24 @@ class TestManagedDownloadLifecycle(unittest.TestCase):
         self.assertEqual(res.status, ItemResultStatus.SKIPPED)
         self.assertIn("Outstanding media: 0", stdout_buf.getvalue())
         self.assertIn("All media is already downloaded.", stdout_buf.getvalue())
+
+    @patch("downloader.dispatcher.get_cdp_target")
+    def test_start_managed_signal_cdp_fails_if_unmanaged_port_in_use(self, mock_get_cdp):
+        mock_get_cdp.return_value = {"webSocketDebuggerUrl": "ws://localhost:9222/page/1"}
+        proc, err = dispatcher.start_managed_signal_cdp(cdp_port=9222)
+        self.assertIsNone(proc)
+        self.assertIn("already in use by an unmanaged CDP endpoint", err)
+
+    @patch("downloader.dispatcher.get_cdp_target")
+    @patch("subprocess.Popen")
+    def test_stop_managed_signal_cdp_verifies_port_cleanup(self, mock_popen, mock_get_cdp):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        # Target exists initially, then becomes None after cleanup
+        mock_get_cdp.side_effect = [{"webSocketDebuggerUrl": "ws://localhost:9222"}, None]
+
+        dispatcher.stop_managed_signal_cdp(mock_proc, relaunch_normal=False, cdp_port=9222)
+        mock_proc.terminate.assert_called_once()
 
     @patch("downloader.dispatcher.start_managed_signal_cdp")
     @patch("downloader.dispatcher.is_signal_running")
