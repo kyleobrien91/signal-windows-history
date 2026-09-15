@@ -64,13 +64,16 @@ def main():
     parser.add_argument('--no-browser',    action='store_true')
     parser.add_argument('--auto-close',    action='store_true', help="Automatically close Signal if running without prompting")
     parser.add_argument('--auto-download', '--sync', action='store_true', dest='auto_download', help="Automatically run background sync/download")
+    parser.add_argument('--download-only', '--download-media-only', action='store_true', dest='download_only', help="Download outstanding media only without starting player")
     args = parser.parse_args()
 
     print("[Signal Player] Starting…")
 
     sig_running = is_signal_running()
 
-    if args.auto_close:
+    if args.download_only:
+        choice = "download_only"
+    elif args.auto_close:
         choice = "1"
     elif args.auto_download:
         choice = "2"
@@ -83,22 +86,38 @@ def main():
             print("    [1] Close Signal now to copy the latest database & start player")
             print("    [2] Fast startup + background sync (close Signal for snapshot, start player, relaunch in background to auto-download pending videos)")
             print("    [3] Proceed immediately (copy live database snapshot while Signal runs)")
+            print("    [4] Download outstanding media only")
             print("-" * 60)
             try:
-                choice = input("  Select option [1/2/3] (default: 2): ").strip() or "2"
+                choice = input("  Select option [1/2/3/4] (default: 2): ").strip() or "2"
             except (EOFError, KeyboardInterrupt):
                 choice = "2"
+            if choice == "4":
+                choice = "download_only"
         else:
             print("  Signal Desktop Status: NOT RUNNING")
             print("=" * 60)
             print("  Please choose how you would like to proceed:")
             print("    [1] Start player immediately (browse currently available videos)")
             print("    [2] Start player + background sync (launch Signal in background with CDP to auto-download pending videos)")
+            print("    [3] Download outstanding media only")
             print("-" * 60)
             try:
-                choice = input("  Select option [1/2] (default: 2): ").strip() or "2"
+                choice = input("  Select option [1/2/3] (default: 2): ").strip() or "2"
             except (EOFError, KeyboardInterrupt):
                 choice = "2"
+            if choice == "3":
+                choice = "download_only"
+
+    if choice == "download_only":
+        from downloader import run_managed_download, ItemResultStatus
+        res = run_managed_download(show_progress=True)
+        if res.status in (ItemResultStatus.SUCCESS, ItemResultStatus.SKIPPED):
+            sys.exit(0)
+        elif res.status == ItemResultStatus.CANCELLED:
+            sys.exit(130)
+        else:
+            sys.exit(1)
 
     if choice == "1":
         if sig_running:
@@ -173,19 +192,7 @@ def main():
                 script_dir = os.path.dirname(os.path.abspath(__file__))
                 if script_dir not in sys.path:
                     sys.path.insert(0, script_dir)
-                from downloader.dispatcher import run_headless_download, query_pending_video_groups
-
-                print("[Background Sync] Launching Signal with --remote-debugging-port=9222...")
-                sig_exe = os.path.expandvars(r"%LOCALAPPDATA%\Programs\signal-desktop\Signal.exe")
-                if not os.path.exists(sig_exe):
-                    sig_exe = "Signal.exe"
-                try:
-                    subprocess.Popen([sig_exe, "--remote-debugging-port=9222"])
-                    time.sleep(5)
-                except Exception as e:
-                    print(f"[Background Sync] Could not launch Signal: {e}")
-                    return
-
+                from downloader import run_managed_download, query_pending_video_groups, ItemResultStatus
                 from metadata import _set_sync_status
                 from db import reload_db
 
@@ -198,9 +205,9 @@ def main():
                 _set_sync_status(True, pending=total_pending, initial=total_pending)
                 print(f"[Background Sync] Started background download of {total_pending} pending videos across {len(pending_groups)} groups.")
 
-                run_res = run_headless_download(db_path, key, cdp_port=9222, wait_seconds=10)
+                run_res = run_managed_download(db_path=db_path, key=key, cdp_port=9222, show_progress=False)
 
-                if run_res:
+                if run_res and run_res.status in (ItemResultStatus.SUCCESS, ItemResultStatus.SKIPPED):
                     reload_db(key)
                     _set_sync_status(False, pending=0)
                     print("\n[Background Sync] [OK] Background media download completed and database refreshed!")
