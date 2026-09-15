@@ -12,7 +12,6 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from player.media import serve_encrypted_media
 from player.server import _Handler as ServerHandler, _media_lookup, _lookup_lock
-from signal_player import _Handler as SignalPlayerHandler
 import crypto.key as crypto_key
 import signal_crypto
 

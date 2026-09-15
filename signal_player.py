@@ -7,11 +7,6 @@ This shim contains no business logic.
 
 import sys
 from player.server import (
-    WEB_DIR,
-    _Handler,
-    _attach_root,
-    _lookup_lock,
-    _media_lookup,
     is_signal_running,
     kill_signal,
     main,

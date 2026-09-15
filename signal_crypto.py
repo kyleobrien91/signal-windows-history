@@ -15,13 +15,13 @@ from crypto import (
     inspect_attachment,
     stream_attachment_range,
 )
-from crypto.dpapi import DATA_BLOB as _DATA_BLOB
-from crypto.key import (
-    _CACHE_MAX,
-    _cache,
-    _cache_lock,
-    _get_cached,
-)
+
+# Retained private legacy compatibility accessors for existing callers/tests
+_DATA_BLOB = sys.modules["crypto.dpapi"].DATA_BLOB
+_CACHE_MAX = sys.modules["crypto.key"]._CACHE_MAX
+_cache = sys.modules["crypto.key"]._cache
+_cache_lock = sys.modules["crypto.key"]._cache_lock
+_get_cached = sys.modules["crypto.key"]._get_cached
 
 
 def _decrypt_blob(enc_path: str, local_key_b64: str, declared_size: int = None) -> bytes:
