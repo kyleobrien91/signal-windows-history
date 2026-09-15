@@ -1,7 +1,11 @@
-# Python cache
+# Python cache & build artifacts
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
+*.egg
+build/
+dist/
 
 # Virtual environments
 venv/

@@ -166,3 +166,10 @@ def _query_media(group_id: Optional[str] = None) -> Tuple[List[dict], dict]:
     media.sort(key=lambda m: m.get("sent_at", 0), reverse=True)
 
     return media, server_lookup
+
+
+# Clean public API aliases
+query_groups = _query_groups
+query_media = _query_media
+query_new_count = _query_new_count
+get_conversation_map = _get_conversation_map

@@ -7,7 +7,8 @@ Nothing is decrypted to disk — all streaming happens in RAM.
 
 ```powershell
 $env:PYTHONIOENCODING = 'utf-8'
-python signal_player.py --port 7788
+signal-player --port 7788
+# Or: python -m player --port 7788
 # Opens http://127.0.0.1:7788 automatically
 ```
 
@@ -74,22 +75,20 @@ On both operating systems, Signal Desktop stores messages inside an SQLite datab
 ┌────────────────────────────────────────────────────────┐
 │ 64-Character Hex SQLCipher Key                         │
 │ -> PRAGMA key = "x'<64-char-hex>'";                    │
-└────────────────────────────────────────────────────────┘
+└──────────────────────────┬─────────────────────────────┘
 ```
 
 ---
 
 ## 2. Prerequisites
 
-Open PowerShell or Command Prompt on Windows and install the required Python libraries:
+Open PowerShell or Command Prompt on Windows and install the package:
 
 ```powershell
-pip install cryptography sqlcipher3
+pip install -e .
 ```
 
-- `cryptography`: Provides authenticated AES-256-GCM decryption.
-- `sqlcipher3`: Provides pre-compiled Windows wheels for Python to open SQLCipher-encrypted databases without needing Visual Studio or OpenSSL toolchains.
-- `ctypes`: Standard library module used to call Windows native DPAPI (`CryptUnprotectData` in `crypt32.dll`).
+Dependencies installed automatically include `cryptography`, `sqlcipher3`, and `websockets`.
 
 *(Optional GUI)* If you prefer a visual database viewer, install DB Browser for SQLite:
 ```powershell
@@ -100,71 +99,21 @@ winget install DBBrowserForSQLite.DBBrowserForSQLite
 
 ## 3. Step 1: Extract the SQLCipher Key
 
-Create a script named [`signal_key.py`](file:///w:/home/user/development/homelab/signal-windows-history/signal_key.py) or run the following logic to retrieve your database key:
+You can use the package CLI entry point or python module execution:
+
+```powershell
+signal-cli --show-key
+# Or: python -m cli --show-key
+```
+
+Or write a minimal Python snippet using the `crypto` package:
 
 ```python
-import base64
-import ctypes
-from ctypes import wintypes
-import json
-import os
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from crypto import get_signal_key
 
-# Define Windows DATA_BLOB structure for DPAPI
-class DATA_BLOB(ctypes.Structure):
-    _fields_ = [
-        ("cbData", wintypes.DWORD),
-        ("pbData", ctypes.POINTER(ctypes.c_byte))
-    ]
-
-def dpapi_decrypt(encrypted_bytes: bytes) -> bytes:
-    p_data_in = DATA_BLOB(
-        len(encrypted_bytes),
-        ctypes.cast(ctypes.create_string_buffer(encrypted_bytes), ctypes.POINTER(ctypes.c_byte))
-    )
-    p_data_out = DATA_BLOB()
-    if not ctypes.windll.crypt32.CryptUnprotectData(
-        ctypes.byref(p_data_in), None, None, None, None, 0, ctypes.byref(p_data_out)
-    ):
-        raise ctypes.WinError()
-    decrypted = ctypes.string_at(p_data_out.pbData, p_data_out.cbData)
-    ctypes.windll.kernel32.LocalFree(p_data_out.pbData)
-    return decrypted
-
-def get_key():
-    signal_dir = os.path.join(os.environ["APPDATA"], "Signal")
-    
-    # 1. Decrypt Master Key from Local State using DPAPI
-    with open(os.path.join(signal_dir, "Local State"), "r", encoding="utf-8") as f:
-        local_state = json.load(f)
-    raw_key = base64.b64decode(local_state["os_crypt"]["encrypted_key"])
-    master_key = dpapi_decrypt(raw_key[5:]) # Strip 'DPAPI' (5 bytes)
-
-    # 2. Decrypt SQLCipher key from config.json using AES-256-GCM
-    with open(os.path.join(signal_dir, "config.json"), "r", encoding="utf-8") as f:
-        config = json.load(f)
-    
-    enc_bytes = bytes.fromhex(config["encryptedKey"])
-    nonce = enc_bytes[3:15] # 12 bytes after 'v10'
-    ciphertext_and_tag = enc_bytes[15:]
-    
-    aesgcm = AESGCM(master_key)
-    return aesgcm.decrypt(nonce, ciphertext_and_tag, None).decode("utf-8")
-
-if __name__ == "__main__":
-    key = get_key()
-    print(f"Decrypted Key: {key}")
-    print(f"PRAGMA Key:    x'{key}'")
-```
-
-Run it:
-```powershell
-python signal_key.py
-```
-**Output:**
-```
-Decrypted Key: 91330144b0bd90fb00388c749333c08c455ac9ec45f9d6e6e9e0ab78ae713aa9
-PRAGMA Key:    x'91330144b0bd90fb00388c749333c08c455ac9ec45f9d6e6e9e0ab78ae713aa9'
+key = get_signal_key()
+print(f"Decrypted Key: {key}")
+print(f"PRAGMA Key:    x'{key}'")
 ```
 
 ---
@@ -273,18 +222,20 @@ ORDER BY sent_at ASC;
 
 ---
 
-## 7. Turnkey Automation: `signal_grep.py`
+## 7. Turnkey Automation: `signal-cli` (`python -m cli`)
 
-This repository includes [`signal_grep.py`](file:///w:/home/user/development/homelab/signal-windows-history/signal_grep.py), an all-in-one CLI tool that automates DPAPI extraction, database copying, and searching:
+The CLI utility automates DPAPI extraction, database copying, and searching:
+
+*(Legacy root script `signal_grep.py` remains supported as a thin compatibility shim).*
 
 ### Show Decrypted Key
 ```powershell
-python signal_grep.py --show-key
+signal-cli --show-key
 ```
 
 ### List All Conversations
 ```powershell
-python signal_grep.py --list-chats
+signal-cli --list-chats
 ```
 ```
 CONVERSATION ID                          | MSGS   | LAST ACTIVE         | NAME / TITLE
@@ -295,7 +246,7 @@ f0b9ddf1-dccd-46f1-9be6-23028038cf7a     | 5      | 2026-09-03 15:37:27 | Signal
 
 ### Search Messages
 ```powershell
-python signal_grep.py --search "dinner"
+signal-cli --search "dinner"
 ```
 ```
 --- Search results for 'dinner' (1 matches) ---
@@ -304,17 +255,17 @@ python signal_grep.py --search "dinner"
 
 ### Filter Search by Contact
 ```powershell
-python signal_grep.py --search "dinner" --chat "Alice"
+signal-cli --search "dinner" --chat "Alice"
 ```
 
 ### Dump Full Conversation Transcript
 ```powershell
-python signal_grep.py --thread "Alice"
+signal-cli --thread "Alice"
 ```
 
 ### Execute Arbitrary SQL
 ```powershell
-python signal_grep.py --sql "SELECT count(*) FROM messages WHERE hasAttachments = 1;"
+signal-cli --sql "SELECT count(*) FROM messages WHERE hasAttachments = 1;"
 ```
 
 ---
@@ -383,12 +334,11 @@ We provide [`auto_download_media.js`](file:///w:/home/user/development/homelab/s
 2. Navigate to your group chat.
 3. Press **`Ctrl + Shift + I`** $\to$ go to the **Console** tab $\to$ paste the contents of [`auto_download_media.js`](file:///w:/home/user/development/homelab/signal-windows-history/auto_download_media.js) and hit **Enter**.
 
-#### Method B: Using `signal_grep.py` (Automated)
-
+#### Method B: Using `signal-cli` (Automated)
 
 1. **List all downloaded media with metadata:**
    ```powershell
-   python signal_grep.py --list-media
+   signal-cli --list-media
    ```
    **Output:**
    ```text
@@ -400,7 +350,7 @@ We provide [`auto_download_media.js`](file:///w:/home/user/development/homelab/s
 
 2. **Export and decrypt all media to an output folder:**
    ```powershell
-   python signal_grep.py --export-media --output-dir "C:\Users\<User>\Desktop\SignalMedia"
+   signal-cli --export-media --output-dir "C:\Users\<User>\Desktop\SignalMedia"
    ```
    This automatically:
    - Verifies HMAC authenticity for every file.
@@ -411,45 +361,18 @@ We provide [`auto_download_media.js`](file:///w:/home/user/development/homelab/s
 
 3. **Filter export by specific contact or thread:**
    ```powershell
-   python signal_grep.py --export-media --chat "Alice" --output-dir "./alice_media"
+   signal-cli --export-media --chat "Alice" --output-dir "./alice_media"
    ```
 
-#### Method B: Standalone Python Decryption Function
+#### Method C: Standalone Python Decryption Function
 
-If you are writing your own script, you can decrypt any Signal attachment with this function:
+If you are writing your own script, you can decrypt any Signal attachment using the `crypto` package:
 
 ```python
-import base64
-import hashlib
-import hmac
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from crypto import decrypt_attachment
 
-def decrypt_signal_attachment(enc_bytes: bytes, local_key_b64: str, original_size: int = None) -> bytes:
-    raw_key = base64.b64decode(local_key_b64)
-    aes_key = raw_key[:32]
-    mac_key = raw_key[32:]
+with open("path/to/encrypted/file", "rb") as f:
+    enc_bytes = f.read()
 
-    iv = enc_bytes[:16]
-    ciphertext = enc_bytes[16:-32]
-    expected_tag = enc_bytes[-32:]
-
-    # 1. Verify HMAC
-    computed_tag = hmac.new(mac_key, enc_bytes[:-32], hashlib.sha256).digest()
-    if computed_tag != expected_tag:
-        raise ValueError("Attachment HMAC integrity check failed.")
-
-    # 2. Decrypt AES-256-CBC
-    cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv))
-    decryptor = cipher.decryptor()
-    plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-
-    # 3. Strip PKCS7 padding
-    pad_len = plaintext[-1]
-    plaintext = plaintext[:-pad_len]
-
-    # 4. Truncate to exact recorded payload size
-    if original_size and original_size <= len(plaintext):
-        plaintext = plaintext[:original_size]
-
-    return plaintext
+plaintext = decrypt_attachment(enc_bytes, local_key_b64, original_size)
 ```
