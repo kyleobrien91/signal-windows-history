@@ -154,8 +154,21 @@ def list_media(cur, chat_filter: str = None):
     print(f"\nTotal attachments found: {len(rows)}")
 
 
-def export_media(cur, output_dir: str, chat_filter: str = None):
-    """Decrypts and exports all attachments to disk."""
+def _split_stem_ext(filename: str):
+    """Splits filename into (stem, ext), handling double extensions like .tar.gz."""
+    lower = filename.lower()
+    for double_ext in ('.tar.gz', '.tar.bz2', '.tar.xz', '.tar.zst'):
+        if lower.endswith(double_ext):
+            return filename[:-len(double_ext)], filename[-len(double_ext):]
+    return os.path.splitext(filename)
+
+
+def export_media(cur, output_dir: str, chat_filter: str = None) -> bool:
+    """Decrypts and exports all attachments to disk.
+
+    Returns True if all attachments exported successfully (or none were found),
+    or False if one or more failures occurred.
+    """
     appdata = os.environ.get("APPDATA")
     attach_root = os.path.join(appdata, "Signal", "attachments.noindex") if appdata else ""
 
@@ -185,20 +198,26 @@ def export_media(cur, output_dir: str, chat_filter: str = None):
 
     if not rows:
         print("No attachments found to export.")
-        return
+        return True
 
-    os.makedirs(output_dir, exist_ok=True)
+    abs_output_dir = os.path.abspath(output_dir)
+    try:
+        os.makedirs(abs_output_dir, exist_ok=True)
+    except Exception as e:
+        print(f"Error creating output directory '{abs_output_dir}': {e}", file=sys.stderr)
+        return False
+
     exported_count = 0
     errors = 0
 
-    print(f"\nExporting {len(rows)} attachments to '{output_dir}'...")
+    print(f"\nExporting {len(rows)} attachments to '{abs_output_dir}'...")
 
     for r in rows:
         mid, ts, sent_at_ms, chat, ctype, size, fname, rel_path, local_key = r
         full_enc_path = os.path.join(attach_root, rel_path)
 
         if not os.path.exists(full_enc_path):
-            print(f"  [MISSING] {rel_path} (referenced by msg {mid[:8]})")
+            print(f"Error: Missing attachment file '{rel_path}' for message '{mid}'", file=sys.stderr)
             errors += 1
             continue
 
@@ -208,39 +227,92 @@ def export_media(cur, output_dir: str, chat_filter: str = None):
 
             plaintext = decrypt_attachment(enc_data, local_key, size)
 
-            clean_chat = "".join(c for c in chat if c.isalnum() or c in (" ", "_", "-")).strip()
+            clean_chat = "".join(c for c in (chat or "Unnamed") if c.isalnum() or c in (" ", "_", "-")).strip()
             if not clean_chat:
                 clean_chat = "chat"
-            chat_dir = os.path.join(output_dir, clean_chat)
+
+            chat_dir = os.path.abspath(os.path.join(abs_output_dir, clean_chat))
+            if os.path.commonpath([abs_output_dir, chat_dir]) != abs_output_dir:
+                print(f"Error exporting attachment '{rel_path}' for message '{mid}': Invalid chat path traversal", file=sys.stderr)
+                errors += 1
+                continue
+
             os.makedirs(chat_dir, exist_ok=True)
 
             if fname:
-                out_name = fname
+                base_fname = os.path.basename(fname)
             else:
-                ext = mimetypes.guess_extension(ctype) or ".bin"
+                base_fname = ""
+
+            clean_fname = "".join(c for c in base_fname if c.isalnum() or c in (".", "-", "_", " ")).strip()
+            clean_fname = clean_fname.lstrip(".")
+
+            if not clean_fname:
+                ext = mimetypes.guess_extension(ctype or "") or ".bin"
                 if ext == ".jpe":
                     ext = ".jpg"
                 ts_clean = (ts or "unknown").replace(":", "-").replace(" ", "_")
-                out_name = f"{ts_clean}_{mid[:8]}{ext}"
+                clean_fname = f"{ts_clean}_{mid[:8]}{ext}"
 
-            out_name = "".join(c for c in out_name if c.isalnum() or c in (".", "-", "_", " ")).strip()
-            out_path = os.path.join(chat_dir, out_name)
+            stem, ext = _split_stem_ext(clean_fname)
 
-            with open(out_path, "wb") as out_f:
-                out_f.write(plaintext)
+            candidate_names = []
+            c_base = f"{stem}{ext}"
+            c_8 = f"{stem}_{mid[:8]}{ext}"
+            c_16 = f"{stem}_{mid[:16]}{ext}"
+            c_full = f"{stem}_{mid}{ext}"
+
+            for c in [c_base, c_8, c_16, c_full]:
+                if c not in candidate_names:
+                    candidate_names.append(c)
+
+            written = False
+            chosen_path = None
+            chosen_name = None
+
+            for candidate in candidate_names:
+                cand_path = os.path.abspath(os.path.join(chat_dir, candidate))
+                if os.path.commonpath([chat_dir, cand_path]) != chat_dir:
+                    continue
+
+                try:
+                    with open(cand_path, "xb") as out_f:
+                        out_f.write(plaintext)
+                    written = True
+                    chosen_path = cand_path
+                    chosen_name = candidate
+                    break
+                except FileExistsError:
+                    continue
+                except Exception as ex:
+                    print(f"Error writing attachment '{rel_path}' for message '{mid}' to '{cand_path}': {ex}", file=sys.stderr)
+                    written = False
+                    break
+
+            if not written:
+                if chosen_path is None and not written:
+                    print(f"Error exporting attachment '{rel_path}' for message '{mid}': All collision resolution candidate filenames are occupied or invalid", file=sys.stderr)
+                errors += 1
+                continue
 
             if sent_at_ms:
                 epoch_sec = sent_at_ms / 1000.0
-                os.utime(out_path, (epoch_sec, epoch_sec))
+                try:
+                    os.utime(chosen_path, (epoch_sec, epoch_sec))
+                except Exception as e:
+                    print(f"Error setting timestamp on attachment '{rel_path}' for message '{mid}': {e}", file=sys.stderr)
+                    errors += 1
+                    continue
 
-            print(f"  [DECRYPTED] {clean_chat}/{out_name} ({len(plaintext):,} bytes)")
+            print(f"  [DECRYPTED] {clean_chat}/{chosen_name} ({len(plaintext):,} bytes)")
             exported_count += 1
         except Exception as e:
-            print(f"  [ERROR] {rel_path}: {e}")
+            print(f"Error decrypting attachment '{rel_path}' for message '{mid}': {e}", file=sys.stderr)
             errors += 1
 
     print(f"\nDone! Exported: {exported_count}, Errors/Missing: {errors}")
-    print(f"Output directory: {os.path.abspath(output_dir)}")
+    print(f"Output directory: {abs_output_dir}")
+    return errors == 0
 
 
 def main():
@@ -295,7 +367,9 @@ def main():
         elif args.list_media:
             list_media(cur, args.chat)
         elif args.export_media:
-            export_media(cur, args.output_dir, args.chat)
+            success = export_media(cur, args.output_dir, args.chat)
+            if not success:
+                sys.exit(1)
         elif args.sql:
             run_custom_sql(cur, args.sql)
         else:
