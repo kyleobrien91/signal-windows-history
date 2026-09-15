@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 import crypto
 from crypto.attachment import decrypt_attachment, inspect_attachment, stream_attachment_range
@@ -114,8 +115,10 @@ class TestCryptoPackage(unittest.TestCase):
             os.unlink(enc_path)
 
     @patch("crypto.key.dpapi_decrypt")
-    def test_get_signal_key(self, mock_dpapi):
-        mock_dpapi.return_value = b"master_key_32_bytes_long_012345"
+    def test_get_signal_key_encrypted_key_path(self, mock_dpapi):
+        expected_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        master_key = os.urandom(32)
+        mock_dpapi.return_value = master_key
 
         local_state = {
             "os_crypt": {
@@ -123,21 +126,25 @@ class TestCryptoPackage(unittest.TestCase):
             }
         }
 
-        # Mock config.json with plaintext key fallback for clean testing
-        config_json = {"key": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
+        nonce = os.urandom(12)
+        encrypted = AESGCM(master_key).encrypt(nonce, expected_key.encode("utf-8"), None)
+        encrypted_key = "v10" + (nonce + encrypted).hex()
+        config_json = {"encryptedKey": encrypted_key}
 
         with tempfile.TemporaryDirectory() as tmpdir:
             sig_dir = os.path.join(tmpdir, "Signal")
             os.makedirs(sig_dir)
 
-            with open(os.path.join(sig_dir, "Local State"), "w") as f:
+            with open(os.path.join(sig_dir, "Local State"), "w", encoding="utf-8") as f:
                 json.dump(local_state, f)
-            with open(os.path.join(sig_dir, "config.json"), "w") as f:
+            with open(os.path.join(sig_dir, "config.json"), "w", encoding="utf-8") as f:
                 json.dump(config_json, f)
 
             with patch.dict(os.environ, {"APPDATA": tmpdir}):
                 key = get_signal_key()
-                self.assertEqual(key, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+
+        self.assertEqual(key, expected_key)
+        mock_dpapi.assert_called_once_with(b"dummy_encrypted_master_key")
 
     def test_inspect_and_stream_attachment_range(self):
         plaintext = b"Chunk 1 payload " * 100  # 1600 bytes
