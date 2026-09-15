@@ -8,8 +8,6 @@ This shim contains no business logic.
 import sys
 import downloader.dispatcher as dispatcher
 from downloader.dispatcher import (
-    _evaluate_cdp,
-    _trigger_group_download,
     get_cdp_target,
     query_pending_video_groups,
     run_headless_download,
