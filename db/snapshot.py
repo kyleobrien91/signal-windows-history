@@ -22,6 +22,51 @@ def _snapshot_dir() -> str:
     return tempfile.mkdtemp(prefix="signal-player-work-", dir=temp_root)
 
 
+def _is_busy_or_locked_error(exc: Exception, sqlcipher3_module) -> bool:
+    """Check if exception represents a SQLite/SQLCipher BUSY or LOCKED transient error."""
+    op_err_cls = getattr(sqlcipher3_module, "OperationalError", None)
+    db_err_cls = getattr(sqlcipher3_module, "DatabaseError", None)
+
+    valid_classes = tuple(cls for cls in (op_err_cls, db_err_cls) if cls is not None)
+
+    if not valid_classes or not isinstance(exc, valid_classes):
+        return False
+
+    SQLITE_BUSY = 5
+    SQLITE_LOCKED = 6
+
+    err_code = getattr(exc, "sqlite_errorcode", None)
+    if err_code is not None and err_code in (SQLITE_BUSY, SQLITE_LOCKED):
+        return True
+
+    ext_code = getattr(exc, "sqlite_extended_errorcode", None)
+    if ext_code is not None and (ext_code & 0xFF) in (SQLITE_BUSY, SQLITE_LOCKED):
+        return True
+
+    msg = str(exc).lower()
+    busy_locked_phrases = (
+        "database is locked",
+        "database is busy",
+        "database table is locked",
+        "lock protocol error",
+        "a table in the database is locked",
+    )
+    return any(phrase in msg for phrase in busy_locked_phrases)
+
+
+def _validate_snapshot(db_dst: str, key: str, sqlcipher3_module) -> None:
+    """Validate destination database after backup completes."""
+    conn = sqlcipher3_module.connect(db_dst)
+    try:
+        conn.execute(f"PRAGMA key = \"x'{key}'\";")
+        conn.execute("PRAGMA cipher_compatibility = 4;")
+        cur = conn.cursor()
+        cur.execute("SELECT count(*) FROM sqlite_master;")
+        cur.fetchone()
+    finally:
+        conn.close()
+
+
 def copy_db_snapshot() -> str:
     """Create a consistent SQLite snapshot of Signal's live SQLCipher DB.
 
@@ -60,15 +105,30 @@ def copy_db_snapshot() -> str:
                     dst_conn.close()
             finally:
                 src_conn.close()
-            return db_dst
-        except Exception:
+
+            break
+        except Exception as exc:
             if os.path.exists(db_dst):
                 try:
                     os.remove(db_dst)
                 except OSError:
                     pass
-            if attempt == max_retries - 1:
-                raise
-            time.sleep(0.3)
 
-    raise RuntimeError("Failed to create a consistent database snapshot")
+            if attempt < max_retries - 1 and _is_busy_or_locked_error(exc, sqlcipher3):
+                time.sleep(0.3)
+                continue
+
+            raise
+
+    # Post-backup validation outside retry loop using the same key
+    try:
+        _validate_snapshot(db_dst, key, sqlcipher3)
+    except Exception:
+        if os.path.exists(db_dst):
+            try:
+                os.remove(db_dst)
+            except OSError:
+                pass
+        raise
+
+    return db_dst

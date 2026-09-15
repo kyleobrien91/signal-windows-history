@@ -25,6 +25,7 @@ class MockHTTPHandler:
         self.wfile = io.BytesIO()
         self.error_code = None
         self.error_message = None
+        self.close_connection = False
 
     def send_response(self, code, message=None):
         self.response_code = code
@@ -38,6 +39,17 @@ class MockHTTPHandler:
     def send_error(self, code, message=None, explain=None):
         self.error_code = code
         self.error_message = message
+
+
+class FailingWriter:
+    def __init__(self, fail_after_bytes=10):
+        self.written = 0
+        self.fail_after_bytes = fail_after_bytes
+
+    def write(self, chunk):
+        if self.written + len(chunk) > self.fail_after_bytes:
+            raise OSError("Connection reset by peer")
+        self.written += len(chunk)
 
 
 def make_encrypted_attachment(plaintext: bytes, key_b64: str) -> bytes:
@@ -96,6 +108,75 @@ class TestMediaFailures(unittest.TestCase):
         finally:
             os.unlink(enc_path)
 
+    def test_post_header_stream_chunk_failure(self):
+        plaintext = b"A" * 1000
+        enc_data = make_encrypted_attachment(plaintext, self.key_b64)
+
+        with tempfile.NamedTemporaryFile(suffix="_abc123.bin", delete=False) as f:
+            f.write(enc_data)
+            enc_path = f.name
+
+        try:
+            handler = MockHTTPHandler()
+            stderr_buf = io.StringIO()
+
+            def failing_stream(*args, **kwargs):
+                yield b"A" * 10
+                raise RuntimeError("Stream read failure")
+
+            with patch("player.media.stream_attachment_range", side_effect=failing_stream):
+                with patch("sys.stderr", stderr_buf):
+                    with self.assertRaises(RuntimeError):
+                        serve_encrypted_media(handler, enc_path, self.key_b64, None, "video/mp4")
+
+            # 1. 200 headers were sent
+            self.assertEqual(handler.response_code, 200)
+            self.assertEqual(handler.response_headers["Content-Length"], "1000")
+            # 2. send_error was NOT called
+            self.assertIsNone(handler.error_code)
+            # 3. close_connection is True
+            self.assertTrue(handler.close_connection)
+            # 4. Truncated output: written bytes < Content-Length
+            written_bytes = handler.wfile.getvalue()
+            self.assertLess(len(written_bytes), 1000)
+            # 5. Sanitized log checks
+            err_log = stderr_buf.getvalue()
+            self.assertIn("abc123.bin", err_log)
+            self.assertIn("RuntimeError", err_log)
+            self.assertNotIn("secret_user_john_doe", err_log)
+            self.assertNotIn(self.key_b64, err_log)
+            self.assertNotIn("AAAAA", err_log)
+        finally:
+            os.unlink(enc_path)
+
+    def test_post_header_wfile_write_failure(self):
+        plaintext = b"B" * 1000
+        enc_data = make_encrypted_attachment(plaintext, self.key_b64)
+
+        with tempfile.NamedTemporaryFile(suffix="_abc123.bin", delete=False) as f:
+            f.write(enc_data)
+            enc_path = f.name
+
+        try:
+            handler = MockHTTPHandler()
+            handler.wfile = FailingWriter(fail_after_bytes=10)
+            stderr_buf = io.StringIO()
+
+            with patch("sys.stderr", stderr_buf):
+                with self.assertRaises(OSError):
+                    serve_encrypted_media(handler, enc_path, self.key_b64, None, "video/mp4")
+
+            self.assertEqual(handler.response_code, 200)
+            self.assertIsNone(handler.error_code)
+            self.assertTrue(handler.close_connection)
+            self.assertLess(handler.wfile.written, 1000)
+            err_log = stderr_buf.getvalue()
+            self.assertIn("abc123.bin", err_log)
+            self.assertIn("OSError", err_log)
+            self.assertNotIn(self.key_b64, err_log)
+        finally:
+            os.unlink(enc_path)
+
     def test_unregistered_media_lookup_returns_404(self):
         handler = MockHTTPHandler()
         stderr_buf = io.StringIO()
@@ -113,6 +194,54 @@ class TestMediaFailures(unittest.TestCase):
         err_msg = str(ctx.exception)
         self.assertIn("abc123.bin", err_msg)
         self.assertNotIn("secret_user_john_doe", err_msg)
+
+    def test_integration_post_header_stream_failure_terminates_socket(self):
+        import http.client
+        from http.client import RemoteDisconnected
+        import threading
+        from http.server import ThreadingHTTPServer
+
+        plaintext = b"X" * 100000
+        enc_data = make_encrypted_attachment(plaintext, self.key_b64)
+
+        with tempfile.NamedTemporaryFile(suffix="_realhttp.bin", delete=False) as f:
+            f.write(enc_data)
+            enc_path = f.name
+
+        def failing_stream(*args, **kwargs):
+            yield b"X" * 1024
+            raise RuntimeError("Mid-stream connection failure")
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), ServerHandler)
+        port = server.server_port
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+
+        msg_id = "integration_test_msg"
+        media_entry = (enc_path, self.key_b64, len(plaintext), "video/mp4")
+
+        with _lookup_lock:
+            _media_lookup[msg_id] = media_entry
+
+        try:
+            with patch("player.media.stream_attachment_range", side_effect=failing_stream):
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                conn.request("GET", f"/stream/{msg_id}")
+                resp = conn.getresponse()
+
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.getheader("Content-Length"), "100000")
+
+                with self.assertRaises((http.client.IncompleteRead, ConnectionResetError, RemoteDisconnected)):
+                    resp.read()
+
+                conn.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            os.unlink(enc_path)
+            with _lookup_lock:
+                _media_lookup.pop(msg_id, None)
 
     def test_get_cached_missing_file_raises_sanitized_error(self):
         with self.assertRaises(FileNotFoundError) as ctx:
