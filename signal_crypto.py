@@ -6,8 +6,7 @@ This shim contains no business logic.
 """
 
 import os
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+import sys
 
 from crypto import (
     decrypt_attachment,
@@ -16,18 +15,20 @@ from crypto import (
     inspect_attachment,
     stream_attachment_range,
 )
-from crypto.dpapi import DATA_BLOB, dpapi_decrypt as _dpapi_decrypt
-from crypto.key import (
-    _CACHE_MAX,
-    _cache,
-    _cache_lock,
-    _get_cached,
-)
 
-_DATA_BLOB = DATA_BLOB
+# Retained private legacy compatibility accessors for existing callers/tests
+_DATA_BLOB = sys.modules["crypto.dpapi"].DATA_BLOB
+_CACHE_MAX = sys.modules["crypto.key"]._CACHE_MAX
+_cache = sys.modules["crypto.key"]._cache
+_cache_lock = sys.modules["crypto.key"]._cache_lock
+_get_cached = sys.modules["crypto.key"]._get_cached
 
 
 def _decrypt_blob(enc_path: str, local_key_b64: str, declared_size: int = None) -> bytes:
+    """Legacy compatibility helper function for blob decryption by path.
+
+    Retained strictly for backwards compatibility with legacy callers.
+    """
     if not os.path.exists(enc_path):
         file_id = os.path.basename(enc_path) or "unknown_attachment"
         raise FileNotFoundError(f"Attachment file missing: {file_id}")

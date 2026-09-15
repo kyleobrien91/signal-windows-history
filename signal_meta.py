@@ -17,21 +17,15 @@ from metadata import (
     set_meta,
     set_sync_status,
 )
-from metadata.store import (
-    _all_labels,
-    _get_meta,
-    _get_sync_status,
-    _load_metadata,
-    _mark_seen,
-    _save_metadata,
-    _set_meta,
-    _set_sync_status,
-    _sync_lock,
-    _sync_state,
-)
 
 
 class _SignalMetaModule(sys.modules[__name__].__class__):
+    """Legacy compatibility module class providing properties for writable metadata state.
+
+    Retained strictly for backwards compatibility with legacy callers/tests that reassign
+    signal_meta._META_PATH or signal_meta._meta_data. Canonical callers should use metadata APIs.
+    """
+
     @property
     def _META_PATH(self):
         import metadata.store as meta_s
@@ -59,6 +53,7 @@ class _SignalMetaModule(sys.modules[__name__].__class__):
 
 sys.modules[__name__].__class__ = _SignalMetaModule
 
+# Retained private compatibility accessors for existing legacy callers/tests
 _meta_lock = sys.modules["metadata.store"]._meta_lock
 _session_start_ts = sys.modules["metadata.store"]._session_start_ts
 

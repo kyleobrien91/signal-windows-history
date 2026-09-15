@@ -2,7 +2,8 @@ import sqlite3
 import unittest
 from unittest.mock import patch
 
-import signal_db
+import db
+import db.queries as db_q
 
 
 class TestVideoOrdering(unittest.TestCase):
@@ -74,19 +75,15 @@ class TestVideoOrdering(unittest.TestCase):
         """)
         self.conn.commit()
 
-        self.orig_db_conn = signal_db._db_conn
-        self.orig_db_cur = signal_db._db_cur
-        signal_db._db_conn = self.conn
-        signal_db._db_cur = self.cur
+        self.old_conn = db.set_active_db(self.conn, self.cur)
 
     def tearDown(self):
-        signal_db._db_conn = self.orig_db_conn
-        signal_db._db_cur = self.orig_db_cur
+        db.set_active_db(self.old_conn, self.old_conn.cursor() if self.old_conn else None)
         self.conn.close()
 
     def test_default_ordering_newest_to_oldest(self):
-        """Verify that _query_media returns videos ordered newest to oldest by default."""
-        media, lookup = signal_db._query_media('conv1')
+        """Verify that query_media returns videos ordered newest to oldest by default."""
+        media, lookup = db.query_media('conv1')
         self.assertEqual(len(media), 4)
 
         # Expected order: vid4 (200000), vid3 (100000), vid2 (50000), vid1 (0)
@@ -99,8 +96,8 @@ class TestVideoOrdering(unittest.TestCase):
         self.assertTrue(all(timestamps[i] >= timestamps[i+1] for i in range(len(timestamps)-1)))
 
     def test_all_groups_ordering_newest_to_oldest(self):
-        """Verify that _query_media('all') also orders newest to oldest."""
-        media, _ = signal_db._query_media('all')
+        """Verify that query_media('all') also orders newest to oldest."""
+        media, _ = db.query_media('all')
         self.assertEqual(len(media), 4)
         timestamps = [m['sent_at'] for m in media]
         self.assertEqual(timestamps, [1000000200000, 1000000100000, 1000000050000, 1000000000000])

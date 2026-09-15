@@ -12,7 +12,6 @@ from crypto.attachment import inspect_attachment, stream_attachment_range, decry
 import crypto
 from player.media import parse_range_header, serve_encrypted_media
 import player.server as player_server
-import signal_player
 
 
 def make_encrypted_attachment(plaintext: bytes, key_b64: str) -> bytes:
@@ -278,7 +277,7 @@ def test_cache_non_insertion(test_key):
         os.unlink(enc_path)
 
 
-def test_both_servers_use_shared_handler(test_key, monkeypatch):
+def test_player_server_handler(test_key):
     plaintext = b"Media for player test"
     enc_data = make_encrypted_attachment(plaintext, test_key)
 
@@ -294,23 +293,12 @@ def test_both_servers_use_shared_handler(test_key, monkeypatch):
         with player_server._lookup_lock:
             player_server._media_lookup[msg_id] = media_entry
 
-        # Set up lookup map in signal_player
-        with signal_player._lookup_lock:
-            signal_player._media_lookup[msg_id] = media_entry
-
         # Invoke player_server handler _stream
         srv_handler = MockHTTPHandler()
-        # Mock path and path resolution
+
         player_server._attach_root = ""
         player_server._Handler._stream(srv_handler, msg_id)
         assert srv_handler.response_code == 200
         assert srv_handler.wfile.getvalue() == plaintext
-
-        # Invoke signal_player handler _stream
-        sig_handler = MockHTTPHandler()
-        signal_player._attach_root = ""
-        signal_player._Handler._stream(sig_handler, msg_id)
-        assert sig_handler.response_code == 200
-        assert sig_handler.wfile.getvalue() == plaintext
     finally:
         os.unlink(enc_path)

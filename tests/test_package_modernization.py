@@ -149,6 +149,69 @@ class TestLegacyRootShims(unittest.TestCase):
         self.assertIs(signal_headless_downloader.get_cdp_target, downloader.get_cdp_target)
 
 
+class TestRetainedLegacyPrivateAccessors(unittest.TestCase):
+
+    def test_signal_db_private_accessors(self):
+        import signal_db
+        import db.queries as db_q
+
+        orig_conn, orig_cur = db_q._db_conn, db_q._db_cur
+        try:
+            signal_db._db_conn = "test_conn"
+            signal_db._db_cur = "test_cur"
+
+            self.assertEqual(db_q._db_conn, "test_conn")
+            self.assertEqual(db_q._db_cur, "test_cur")
+            self.assertEqual(signal_db._db_conn, "test_conn")
+            self.assertEqual(signal_db._db_cur, "test_cur")
+        finally:
+            db_q._db_conn, db_q._db_cur = orig_conn, orig_cur
+
+    def test_signal_meta_private_accessors(self):
+        import signal_meta
+        import metadata.store as meta_s
+
+        orig_path = meta_s._META_PATH
+        orig_data = meta_s._meta_data
+        try:
+            signal_meta._META_PATH = "/tmp/test_meta_path.json"
+            signal_meta._meta_data = {"test": True}
+
+            self.assertEqual(meta_s._META_PATH, "/tmp/test_meta_path.json")
+            self.assertEqual(meta_s._meta_data, {"test": True})
+            self.assertEqual(signal_meta._META_PATH, "/tmp/test_meta_path.json")
+            self.assertEqual(signal_meta._meta_data, {"test": True})
+        finally:
+            meta_s._META_PATH = orig_path
+            meta_s._meta_data = orig_data
+
+    def test_signal_crypto_private_accessors(self):
+        import signal_crypto
+        import crypto.key as crypto_k
+
+        self.assertIs(signal_crypto._cache, crypto_k._cache)
+        self.assertIs(signal_crypto._cache_lock, crypto_k._cache_lock)
+        self.assertIs(signal_crypto._get_cached, crypto_k._get_cached)
+        self.assertTrue(callable(signal_crypto._decrypt_blob))
+
+    def test_signal_player_private_accessors(self):
+        import signal_player
+        import metadata.store as meta_s
+        import db.queries as db_q
+
+        orig_path = meta_s._META_PATH
+        orig_conn = db_q._db_conn
+        try:
+            signal_player._META_PATH = "/tmp/player_test.json"
+            signal_player._db_conn = "player_conn"
+
+            self.assertEqual(meta_s._META_PATH, "/tmp/player_test.json")
+            self.assertEqual(db_q._db_conn, "player_conn")
+        finally:
+            meta_s._META_PATH = orig_path
+            db_q._db_conn = orig_conn
+
+
 class TestModuleExecutionFromExternalDir(unittest.TestCase):
 
     def test_cli_module_help_from_tmp(self):
