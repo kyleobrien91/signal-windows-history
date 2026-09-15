@@ -201,7 +201,11 @@ def export_media(cur, output_dir: str, chat_filter: str = None) -> bool:
         return True
 
     abs_output_dir = os.path.abspath(output_dir)
-    os.makedirs(abs_output_dir, exist_ok=True)
+    try:
+        os.makedirs(abs_output_dir, exist_ok=True)
+    except Exception as e:
+        print(f"Error creating output directory '{abs_output_dir}': {e}", file=sys.stderr)
+        return False
 
     exported_count = 0
     errors = 0
@@ -295,8 +299,10 @@ def export_media(cur, output_dir: str, chat_filter: str = None) -> bool:
                 epoch_sec = sent_at_ms / 1000.0
                 try:
                     os.utime(chosen_path, (epoch_sec, epoch_sec))
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"Error setting timestamp on attachment '{rel_path}' for message '{mid}': {e}", file=sys.stderr)
+                    errors += 1
+                    continue
 
             print(f"  [DECRYPTED] {clean_chat}/{chosen_name} ({len(plaintext):,} bytes)")
             exported_count += 1

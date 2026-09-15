@@ -265,6 +265,56 @@ class TestCLIPackage(unittest.TestCase):
             with open(suffixed_path_2, "rb") as f:
                 self.assertEqual(f.read(), b"NEW_DECRYPTED_2")
 
+    def test_export_media_output_dir_creation_failure(self):
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.cur.execute("""
+                INSERT INTO message_attachments (messageId, conversationId, sentAt, contentType, path, localKey, fileName, size)
+                VALUES ('msg00001', 'c1', 1000000000000, 'image/jpeg', 'enc.bin', 'key123', 'photo.jpg', 14);
+            """)
+            self.conn.commit()
+
+            stdout_buf = io.StringIO()
+            stderr_buf = io.StringIO()
+
+            with patch("cli.os.makedirs", side_effect=PermissionError("Permission denied")), \
+                 patch("sys.stdout", stdout_buf), patch("sys.stderr", stderr_buf):
+                res = cli.export_media(self.cur, os.path.join(tmpdir, "invalid_out"))
+
+            self.assertFalse(res)
+            self.assertIn("Error creating output directory", stderr_buf.getvalue())
+
+    def test_export_media_utime_failure(self):
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            attach_root = os.path.join(tmpdir, "Signal", "attachments.noindex")
+            os.makedirs(attach_root, exist_ok=True)
+            with open(os.path.join(attach_root, "enc.bin"), "wb") as f:
+                f.write(b"enc")
+
+            self.cur.execute("""
+                INSERT INTO message_attachments (messageId, conversationId, sentAt, contentType, path, localKey, fileName, size)
+                VALUES ('msg_utime_fail', 'c1', 1000000000000, 'image/jpeg', 'enc.bin', 'key123', 'photo.jpg', 3);
+            """)
+            self.conn.commit()
+
+            stdout_buf = io.StringIO()
+            stderr_buf = io.StringIO()
+
+            with patch.dict(os.environ, {"APPDATA": tmpdir}), \
+                 patch("cli.decrypt_attachment", return_value=b"decrypted"), \
+                 patch("os.utime", side_effect=OSError("utime failed")), \
+                 patch("sys.stdout", stdout_buf), patch("sys.stderr", stderr_buf):
+                out_dir = os.path.join(tmpdir, "out")
+                res = cli.export_media(self.cur, out_dir)
+
+            self.assertFalse(res)
+            self.assertIn("Error setting timestamp on attachment 'enc.bin' for message 'msg_utime_fail': utime failed", stderr_buf.getvalue())
+
     def test_export_media_candidate_exhaustion(self):
         import tempfile
         import os
