@@ -17,18 +17,6 @@ from metadata import (
     set_meta,
     set_sync_status,
 )
-from metadata.store import (
-    _all_labels,
-    _get_meta,
-    _get_sync_status,
-    _load_metadata,
-    _mark_seen,
-    _save_metadata,
-    _set_meta,
-    _set_sync_status,
-    _sync_lock,
-    _sync_state,
-)
 
 
 class _SignalMetaModule(sys.modules[__name__].__class__):
@@ -65,6 +53,7 @@ class _SignalMetaModule(sys.modules[__name__].__class__):
 
 sys.modules[__name__].__class__ = _SignalMetaModule
 
+# Retained private compatibility accessors for existing legacy callers/tests
 _meta_lock = sys.modules["metadata.store"]._meta_lock
 _session_start_ts = sys.modules["metadata.store"]._session_start_ts
 

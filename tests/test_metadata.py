@@ -116,6 +116,16 @@ class TestMetadataPackage(unittest.TestCase):
 
         self.assertEqual(len(errors), 0)
 
+    def test_meta_lock_reentrancy(self):
+        """Explicit regression test verifying _meta_lock is re-entrant (RLock) and does not deadlock when re-acquired on the same thread."""
+        with store._meta_lock:
+            # Re-enter the lock by calling metadata methods that acquire _meta_lock internally
+            metadata.set_meta("msg_reentrant_1", favourite=True, labels=["test_reentrant"])
+            meta = metadata.get_meta("msg_reentrant_1")
+            self.assertTrue(meta["favourite"])
+            self.assertEqual(meta["labels"], ["test_reentrant"])
+            metadata.save_metadata()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -23,15 +23,6 @@ from crypto import (
     inspect_attachment,
     stream_attachment_range,
 )
-from crypto.key import (
-    _CACHE_MAX,
-    _cache,
-    _cache_lock,
-    _get_cached,
-)
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from signal_crypto import _decrypt_blob
 from db import (
     copy_db_snapshot,
     get_conversation_map,
@@ -42,11 +33,6 @@ from db import (
     reload_db,
     set_active_db,
 )
-from db.queries import (
-    _query_groups,
-    _query_media,
-    _query_new_count,
-)
 from metadata import (
     all_labels,
     get_meta,
@@ -56,16 +42,6 @@ from metadata import (
     save_metadata,
     set_meta,
     set_sync_status,
-)
-from metadata.store import (
-    _all_labels,
-    _get_meta,
-    _get_sync_status,
-    _load_metadata,
-    _mark_seen,
-    _save_metadata,
-    _set_meta,
-    _set_sync_status,
 )
 
 
@@ -122,6 +98,7 @@ class _SignalPlayerModule(sys.modules[__name__].__class__):
 
 sys.modules[__name__].__class__ = _SignalPlayerModule
 
+# Retained private compatibility accessors for existing legacy callers/tests
 _meta_lock = sys.modules["metadata.store"]._meta_lock
 _db_lock = sys.modules["db.queries"]._db_lock
 _session_start_ts = sys.modules["metadata.store"]._session_start_ts
