@@ -32,6 +32,12 @@ from metadata.store import (
 
 
 class _SignalMetaModule(sys.modules[__name__].__class__):
+    """Legacy compatibility module class providing properties for writable metadata state.
+
+    Retained strictly for backwards compatibility with legacy callers/tests that reassign
+    signal_meta._META_PATH or signal_meta._meta_data. Canonical callers should use metadata APIs.
+    """
+
     @property
     def _META_PATH(self):
         import metadata.store as meta_s

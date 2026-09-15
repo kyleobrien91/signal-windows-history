@@ -18,6 +18,11 @@ from downloader.results import DownloadResult, GroupDownloadResult, ItemResultSt
 
 
 class _HeadlessDownloaderModule(sys.modules[__name__].__class__):
+    """Legacy compatibility module class providing properties for dispatcher attributes.
+
+    Retained strictly for backwards compatibility with legacy tests that mock/reassign downloader attributes on signal_headless_downloader.
+    """
+
     @property
     def sqlcipher3(self):
         return dispatcher.sqlcipher3
@@ -59,6 +64,15 @@ class _HeadlessDownloaderModule(sys.modules[__name__].__class__):
 
 
 sys.modules[__name__].__class__ = _HeadlessDownloaderModule
+
+__all__ = [
+    "get_cdp_target",
+    "query_pending_video_groups",
+    "run_headless_download",
+    "DownloadResult",
+    "GroupDownloadResult",
+    "ItemResultStatus",
+]
 
 if __name__ == "__main__":
     import argparse

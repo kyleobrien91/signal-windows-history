@@ -23,11 +23,15 @@ from db.queries import (
     _query_media,
     _query_new_count,
 )
-from signal_crypto import get_signal_key
-from signal_meta import _get_meta, _meta_data, _meta_lock
 
 
 class _SignalDBModule(sys.modules[__name__].__class__):
+    """Legacy compatibility module class providing properties for writable DB connection state.
+
+    Retained strictly for backwards compatibility with legacy callers/tests that reassign
+    signal_db._db_conn or signal_db._db_cur. Canonical callers should use set_active_db().
+    """
+
     @property
     def _db_conn(self):
         import db.queries as db_q

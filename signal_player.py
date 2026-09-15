@@ -16,31 +16,48 @@ from player.server import (
     kill_signal,
     main,
 )
-import signal_crypto
-from signal_crypto import (
-    AESGCM,
-    Cipher,
-    algorithms,
+from crypto import (
+    decrypt_attachment,
     dpapi_decrypt,
     get_signal_key,
-    modes,
+    inspect_attachment,
+    stream_attachment_range,
+)
+from crypto.key import (
     _CACHE_MAX,
     _cache,
     _cache_lock,
-    _decrypt_blob,
     _get_cached,
 )
-import signal_db
-from signal_db import (
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from signal_crypto import _decrypt_blob
+from db import (
     copy_db_snapshot,
+    get_conversation_map,
     open_db,
+    query_groups,
+    query_media,
+    query_new_count,
     reload_db,
+    set_active_db,
+)
+from db.queries import (
     _query_groups,
     _query_media,
     _query_new_count,
 )
-import signal_meta
-from signal_meta import (
+from metadata import (
+    all_labels,
+    get_meta,
+    get_sync_status,
+    load_metadata,
+    mark_seen,
+    save_metadata,
+    set_meta,
+    set_sync_status,
+)
+from metadata.store import (
     _all_labels,
     _get_meta,
     _get_sync_status,
@@ -53,6 +70,11 @@ from signal_meta import (
 
 
 class _SignalPlayerModule(sys.modules[__name__].__class__):
+    """Legacy compatibility module class providing properties for writable metadata and DB state.
+
+    Retained strictly for backwards compatibility with legacy callers/tests that reassign state via signal_player.
+    """
+
     @property
     def _META_PATH(self):
         import metadata.store as meta_s
@@ -62,10 +84,8 @@ class _SignalPlayerModule(sys.modules[__name__].__class__):
     def _META_PATH(self, val):
         import metadata.store as meta_s
         import metadata
-        import signal_meta
         meta_s._META_PATH = val
         metadata._META_PATH = val
-        signal_meta._META_PATH = val
 
     @property
     def _meta_data(self):
@@ -76,10 +96,8 @@ class _SignalPlayerModule(sys.modules[__name__].__class__):
     def _meta_data(self, val):
         import metadata.store as meta_s
         import metadata
-        import signal_meta
         meta_s._meta_data = val
         metadata._meta_data = val
-        signal_meta._meta_data = val
 
     @property
     def _db_conn(self):
@@ -107,6 +125,12 @@ sys.modules[__name__].__class__ = _SignalPlayerModule
 _meta_lock = sys.modules["metadata.store"]._meta_lock
 _db_lock = sys.modules["db.queries"]._db_lock
 _session_start_ts = sys.modules["metadata.store"]._session_start_ts
+
+__all__ = [
+    "is_signal_running",
+    "kill_signal",
+    "main",
+]
 
 if __name__ == "__main__":
     main()

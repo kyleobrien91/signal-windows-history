@@ -24,10 +24,12 @@ from crypto.key import (
     _get_cached,
 )
 
+# Legacy compatibility symbol
 _DATA_BLOB = DATA_BLOB
 
 
 def _decrypt_blob(enc_path: str, local_key_b64: str, declared_size: int = None) -> bytes:
+    """Legacy helper function for blob decryption by path. Retained for backwards compatibility."""
     if not os.path.exists(enc_path):
         file_id = os.path.basename(enc_path) or "unknown_attachment"
         raise FileNotFoundError(f"Attachment file missing: {file_id}")
