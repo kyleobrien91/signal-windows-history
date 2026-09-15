@@ -20,9 +20,12 @@ test = [
 ]
 
 [project.scripts]
-signal-player = "player.server:main"
+signal-player = "player.launcher:main"
 signal-cli = "cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["cli*", "config*", "crypto*", "db*", "downloader*", "metadata*", "pipeline*", "player*"]
+include = ["cli*", "config*", "crypto*", "db*", "downloader*", "metadata*", "pipeline*", "player*", "web*"]
+
+[tool.setuptools.package-data]
+web = ["*.html", "*.css", "*.js"]
