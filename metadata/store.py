@@ -18,6 +18,7 @@ _meta_data = {
     "annotations": {}
 }
 _meta_lock = threading.RLock()
+_session_start_ts: int = int(time.time() * 1000)
 
 
 def _load_metadata():
@@ -138,3 +139,14 @@ def _set_sync_status(is_running: bool, pending: int = 0, initial: int = 0):
         if initial > 0:
             _sync_state["total_initial"] = initial
         _sync_state["last_updated"] = int(time.time() * 1000)
+
+
+# Clean public API aliases
+load_metadata = _load_metadata
+save_metadata = _save_metadata
+get_meta = _get_meta
+set_meta = _set_meta
+mark_seen = _mark_seen
+all_labels = _all_labels
+get_sync_status = _get_sync_status
+set_sync_status = _set_sync_status

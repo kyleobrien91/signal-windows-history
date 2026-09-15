@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "signal-windows-history"
+version = "0.1.0"
+description = "Decrypt, query, stream, and export local Signal Desktop history on Windows"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "cryptography",
+    "sqlcipher3",
+    "websockets",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+]
+
+[project.scripts]
+signal-player = "player.server:main"
+signal-cli = "cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cli*", "config*", "crypto*", "db*", "downloader*", "metadata*", "pipeline*", "player*"]

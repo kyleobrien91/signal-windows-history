@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""pipeline - Video deduplication and vaulting pipeline.
+"""pipeline - Internal video processing pipeline modules.
 
-Handles video scaling and processing for the Signal Windows History
-workflow. Separate concern from the core player/download modules.
+This package contains internal utilities for video processing.
+It exposes no public API surface.
 """
 
-__all__ = []
+__all__: list[str] = []
