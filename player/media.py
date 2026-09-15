@@ -149,7 +149,9 @@ def serve_encrypted_media(
                 for chunk in stream_attachment_range(enc_path, local_key_b64, 0, total_length - 1, declared_size):
                     handler.wfile.write(chunk)
             except Exception as e:
-                sys.stderr.write(f"[Media Stream Error] Streaming interrupted for {file_id}: {type(e).__name__}\n")
+                handler.close_connection = True
+                sys.stderr.write(f"[Media Stream Error] Full stream interrupted for {file_id}: {type(e).__name__}\n")
+                raise
 
     elif status == 206:
         start, end = bounds
@@ -167,4 +169,6 @@ def serve_encrypted_media(
                 for chunk in stream_attachment_range(enc_path, local_key_b64, start, end, declared_size):
                     handler.wfile.write(chunk)
             except Exception as e:
-                sys.stderr.write(f"[Media Stream Error] Range streaming interrupted for {file_id}: {type(e).__name__}\n")
+                handler.close_connection = True
+                sys.stderr.write(f"[Media Stream Error] Range stream interrupted for {file_id}: {type(e).__name__}\n")
+                raise

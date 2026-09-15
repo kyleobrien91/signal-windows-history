@@ -29,55 +29,13 @@ _db_cur  = None
 _db_lock = threading.Lock()
 
 
-def _snapshot_dir() -> str:
-    """Create a fresh work directory for a snapshot copy."""
-    temp_root = os.environ.get("TEMP", ".")
-    return tempfile.mkdtemp(prefix="signal-player-work-", dir=temp_root)
-
-
 def copy_db_snapshot() -> str:
-    """Create a consistent SQLite snapshot of Signal's live SQLCipher DB."""
-    appdata = os.environ.get("APPDATA", "")
-    src = os.path.join(appdata, "Signal", "sql")
-    db_src = os.path.join(src, "db.sqlite")
-    if not os.path.exists(db_src):
-        raise FileNotFoundError(f"Signal DB not found: {db_src}")
+    """Create a consistent SQLite snapshot of Signal's live SQLCipher DB.
 
-    key = get_signal_key()
-    dst_dir = _snapshot_dir()
-    db_dst = os.path.join(dst_dir, "db.sqlite")
-
-    max_retries = 5
-    for attempt in range(max_retries):
-        try:
-            source_uri = f"{Path(db_src).resolve().as_uri()}?mode=ro"
-            src_conn = sqlcipher3.connect(source_uri, uri=True)
-            try:
-                src_conn.execute(f"PRAGMA key = \"x'{key}'\";")
-                src_conn.execute("PRAGMA cipher_compatibility = 4;")
-                src_conn.execute("PRAGMA query_only = ON;")
-
-                dst_conn = sqlcipher3.connect(db_dst)
-                try:
-                    dst_conn.execute(f"PRAGMA key = \"x'{key}'\";")
-                    dst_conn.execute("PRAGMA cipher_compatibility = 4;")
-                    src_conn.backup(dst_conn)
-                finally:
-                    dst_conn.close()
-            finally:
-                src_conn.close()
-            return db_dst
-        except Exception:
-            if os.path.exists(db_dst):
-                try:
-                    os.remove(db_dst)
-                except OSError:
-                    pass
-            if attempt == max_retries - 1:
-                raise
-            time.sleep(0.3)
-
-    raise RuntimeError("Failed to create a consistent database snapshot")
+    Delegates directly to canonical implementation in db.snapshot.copy_db_snapshot.
+    """
+    from db.snapshot import copy_db_snapshot as _canonical_copy_db_snapshot
+    return _canonical_copy_db_snapshot()
 
 
 def open_db(db_path: str, key: str):

@@ -44,6 +44,7 @@ class MockHTTPHandler:
         self.wfile = io.BytesIO()
         self.error_code = None
         self.error_message = None
+        self.close_connection = False
 
     def send_response(self, code, message=None):
         self.response_code = code
