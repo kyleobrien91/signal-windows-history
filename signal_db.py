@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """signal_db.py - Legacy compatibility shim for Signal database operations.
 
-Delegates to canonical db and metadata package modules.
+Delegates to canonical db package module.
 This shim contains no business logic.
 """
 
@@ -48,6 +48,8 @@ class _SignalDBModule(sys.modules[__name__].__class__):
 
 
 sys.modules[__name__].__class__ = _SignalDBModule
+
+_db_lock = sys.modules["db.queries"]._db_lock
 
 __all__ = [
     "copy_db_snapshot",

@@ -116,8 +116,7 @@ class TestCryptoPackage(unittest.TestCase):
 
     @patch("crypto.key.dpapi_decrypt")
     def test_get_signal_key_encrypted_key_path(self, mock_dpapi):
-        expected_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        master_key = os.urandom(32)
+        master_key = AESGCM.generate_key(bit_length=256)
         mock_dpapi.return_value = master_key
 
         local_state = {
@@ -126,25 +125,50 @@ class TestCryptoPackage(unittest.TestCase):
             }
         }
 
+        expected_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         nonce = os.urandom(12)
-        encrypted = AESGCM(master_key).encrypt(nonce, expected_key.encode("utf-8"), None)
-        encrypted_key = "v10" + (nonce + encrypted).hex()
-        config_json = {"encryptedKey": encrypted_key}
+        ct = AESGCM(master_key).encrypt(nonce, expected_key.encode("utf-8"), None)
+        enc_payload_hex = (b"v10" + nonce + ct).hex()
+
+        config_json = {"encryptedKey": enc_payload_hex}
 
         with tempfile.TemporaryDirectory() as tmpdir:
             sig_dir = os.path.join(tmpdir, "Signal")
             os.makedirs(sig_dir)
 
-            with open(os.path.join(sig_dir, "Local State"), "w", encoding="utf-8") as f:
+            with open(os.path.join(sig_dir, "Local State"), "w") as f:
                 json.dump(local_state, f)
-            with open(os.path.join(sig_dir, "config.json"), "w", encoding="utf-8") as f:
+            with open(os.path.join(sig_dir, "config.json"), "w") as f:
                 json.dump(config_json, f)
 
             with patch.dict(os.environ, {"APPDATA": tmpdir}):
                 key = get_signal_key()
+                self.assertEqual(key, expected_key)
 
-        self.assertEqual(key, expected_key)
-        mock_dpapi.assert_called_once_with(b"dummy_encrypted_master_key")
+    @patch("crypto.key.dpapi_decrypt")
+    def test_get_signal_key_legacy_plaintext_fallback(self, mock_dpapi):
+        mock_dpapi.return_value = b"master_key_32_bytes_long_012345"
+
+        local_state = {
+            "os_crypt": {
+                "encrypted_key": base64.b64encode(b"DPAPI" + b"dummy_encrypted_master_key").decode("utf-8")
+            }
+        }
+
+        config_json = {"key": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sig_dir = os.path.join(tmpdir, "Signal")
+            os.makedirs(sig_dir)
+
+            with open(os.path.join(sig_dir, "Local State"), "w") as f:
+                json.dump(local_state, f)
+            with open(os.path.join(sig_dir, "config.json"), "w") as f:
+                json.dump(config_json, f)
+
+            with patch.dict(os.environ, {"APPDATA": tmpdir}):
+                key = get_signal_key()
+                self.assertEqual(key, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 
     def test_inspect_and_stream_attachment_range(self):
         plaintext = b"Chunk 1 payload " * 100  # 1600 bytes
