@@ -145,7 +145,7 @@ class TestLegacyRootShims(unittest.TestCase):
     def test_signal_headless_downloader_shim(self):
         import signal_headless_downloader
         import downloader
-        self.assertTrue(callable(signal_headless_downloader.run_headless_download))
+        self.assertIs(signal_headless_downloader.run_headless_download, downloader.run_headless_download)
         self.assertIs(signal_headless_downloader.get_cdp_target, downloader.get_cdp_target)
 
 
