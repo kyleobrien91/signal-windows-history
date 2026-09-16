@@ -52,8 +52,13 @@ except ImportError:
     PLAYER_EXE_PATH = os.path.expandvars(r"%LOCALAPPDATA%\Programs\signal-desktop\Signal.exe")
 
 
-def get_signal_pids() -> List[int]:
-    """Returns list of process IDs for running Signal.exe processes on Windows."""
+def get_signal_pids() -> Tuple[Optional[List[int]], Optional[str]]:
+    """
+    Queries running Signal.exe process IDs on Windows.
+    Returns (pids, None) on success.
+    Returns ([], None) if tasklist executable is not found (e.g. non-Windows platform).
+    Returns (None, error_message) on tasklist execution failure.
+    """
     try:
         out = subprocess.check_output(
             ["tasklist", "/FI", "IMAGENAME eq Signal.exe", "/FO", "CSV", "/NH"],
@@ -68,20 +73,27 @@ def get_signal_pids() -> List[int]:
                     pids.append(int(parts[1]))
                 except ValueError:
                     pass
-        return pids
-    except Exception:
-        return []
+        return pids, None
+    except FileNotFoundError:
+        return [], None
+    except Exception as e:
+        return None, f"tasklist execution failed: {e}"
 
 
 def is_signal_running() -> bool:
     """Checks if Signal.exe is currently running on Windows."""
-    return len(get_signal_pids()) > 0
+    pids, err = get_signal_pids()
+    if err is not None or not pids:
+        return False
+    return len(pids) > 0
 
 
 def safely_stop_signal_processes(pids: Optional[List[int]] = None, timeout: float = 5.0) -> bool:
     """Terminates specific Signal process PIDs safely and verifies they have exited."""
     if pids is None:
-        pids = get_signal_pids()
+        pids, err = get_signal_pids()
+        if err is not None or not pids:
+            return err is None
     if not pids:
         return True
 
@@ -97,12 +109,15 @@ def safely_stop_signal_processes(pids: Optional[List[int]] = None, timeout: floa
 
     t0 = time.time()
     while time.time() - t0 < timeout:
-        remaining = [p for p in pids if p in get_signal_pids()]
-        if not remaining:
-            return True
+        current_pids, err = get_signal_pids()
+        if err is None and current_pids is not None:
+            remaining = [p for p in pids if p in current_pids]
+            if not remaining:
+                return True
         time.sleep(0.3)
 
-    return len(get_signal_pids()) == 0
+    current_pids, _ = get_signal_pids()
+    return current_pids is not None and len(current_pids) == 0
 
 
 def verify_cdp_port_owner(port: int, expected_pid: int) -> bool:
@@ -652,7 +667,16 @@ def run_managed_download(
     Main entrypoint for fully managed download operations (e.g. --download-only).
     Handles process isolation, CDP startup, live progress, cleanup, and session restoration.
     """
-    sig_was_running = is_signal_running()
+    initial_pids, proc_err = get_signal_pids()
+    if proc_err is not None:
+        print(f"[Error] Could not establish Signal process state: {proc_err}", file=sys.stderr)
+        return DownloadResult(
+            success=False,
+            status=ItemResultStatus.FAILED,
+            error_message=f"Process state lookup failed: {proc_err}"
+        )
+
+    sig_was_running = len(initial_pids) > 0
 
     # 1. Extract key and create DB snapshot if not provided
     if not key:

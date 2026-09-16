@@ -1,5 +1,6 @@
 import asyncio
 import io
+import subprocess
 import sys
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -285,6 +286,13 @@ class TestManagedDownloadLifecycle(unittest.TestCase):
         self.assertEqual(res.status, ItemResultStatus.SKIPPED)
         self.assertIn("Outstanding media: 0", stdout_buf.getvalue())
         self.assertIn("All media is already downloaded.", stdout_buf.getvalue())
+
+    @patch("subprocess.check_output", side_effect=subprocess.CalledProcessError(1, "tasklist", output="tasklist error"))
+    def test_run_managed_download_fails_closed_on_tasklist_failure(self, mock_tasklist):
+        res = dispatcher.run_managed_download(db_path="dummy_db", key="dummy_key")
+        self.assertFalse(res)
+        self.assertEqual(res.status, ItemResultStatus.FAILED)
+        self.assertIn("Process state lookup failed", res.error_message)
 
     @patch("subprocess.check_output", side_effect=OSError("netstat error"))
     def test_verify_cdp_port_owner_fails_closed_on_error(self, mock_netstat):
