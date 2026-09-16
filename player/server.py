@@ -38,15 +38,19 @@ def is_signal_running() -> bool:
         return False
 
 
-def kill_signal():
-    """Terminates running Signal.exe processes safely by targeted process IDs."""
+def kill_signal() -> bool:
+    """Terminates running Signal.exe processes safely by targeted process IDs. Returns True on successful verification."""
     try:
         from downloader.dispatcher import get_signal_pids, safely_stop_signal_processes
-        pids = get_signal_pids()
-        if pids:
-            safely_stop_signal_processes(pids)
+        pids, err = get_signal_pids()
+        if err is not None:
+            return False
+        if not pids:
+            return True
+        return safely_stop_signal_processes(pids)
     except Exception as e:
         print(f"[Signal Player] Warning: failed to terminate Signal: {e}")
+        return False
 
 
 # ---------------------------------------------------------------------------

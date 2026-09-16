@@ -287,6 +287,22 @@ class TestManagedDownloadLifecycle(unittest.TestCase):
         self.assertIn("Outstanding media: 0", stdout_buf.getvalue())
         self.assertIn("All media is already downloaded.", stdout_buf.getvalue())
 
+    @patch("downloader.dispatcher.safely_stop_signal_processes", return_value=True)
+    @patch("downloader.dispatcher.get_signal_pids", return_value=([12345], None))
+    def test_kill_signal_handles_tuple_contract_and_returns_boolean(self, mock_pids, mock_stop):
+        from player.server import kill_signal
+        res = kill_signal()
+        self.assertTrue(res)
+        mock_stop.assert_called_once_with([12345])
+
+    @patch("player.server.kill_signal", return_value=False)
+    @patch("downloader.dispatcher.get_signal_pids", return_value=([12345], None))
+    def test_run_managed_download_aborts_if_running_signal_shutdown_fails(self, mock_pids, mock_kill):
+        res = dispatcher.run_managed_download(db_path="dummy_db", key="dummy_key")
+        self.assertFalse(res)
+        self.assertEqual(res.status, ItemResultStatus.FAILED)
+        self.assertIn("Could not verify shutdown of running Signal process", res.error_message)
+
     @patch("subprocess.check_output", side_effect=subprocess.CalledProcessError(1, "tasklist", output="tasklist error"))
     def test_run_managed_download_fails_closed_on_tasklist_failure(self, mock_tasklist):
         res = dispatcher.run_managed_download(db_path="dummy_db", key="dummy_key")

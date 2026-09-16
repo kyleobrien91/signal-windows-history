@@ -694,11 +694,15 @@ def run_managed_download(
 
     # If Signal is running normally without CDP, stop it briefly for clean snapshot & CDP launch
     if sig_was_running:
-        try:
-            from player.server import kill_signal
-            kill_signal()
-        except Exception as e:
-            print(f"[Warning] Failed to stop running Signal process: {e}", file=sys.stderr)
+        from player.server import kill_signal
+        stopped = kill_signal()
+        if not stopped:
+            print("[Error] Could not verify shutdown of running Signal process.", file=sys.stderr)
+            return DownloadResult(
+                success=False,
+                status=ItemResultStatus.FAILED,
+                error_message="Could not verify shutdown of running Signal process"
+            )
 
     if not db_path:
         from db import copy_db_snapshot
