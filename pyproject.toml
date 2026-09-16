@@ -12,8 +12,6 @@ dependencies = [
     "cryptography",
     "sqlcipher3",
     "websockets",
-    "Pillow",
-    "av",
 ]
 
 [project.optional-dependencies]

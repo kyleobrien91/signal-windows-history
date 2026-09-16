@@ -57,9 +57,9 @@ def _save_metadata():
 
 
 def _get_meta(item_id: str, msg_id: str = "", sent_at_ms: int = 0) -> dict:
-    """Retrieves annotation dict, favourite flag, labels, duration, and is_new calculation."""
+    """Retrieves annotation dict, favourite flag, labels, and is_new calculation."""
     with _meta_lock:
-        ann = _meta_data["annotations"].get(item_id) or _meta_data["annotations"].get(msg_id, {"favourite": False, "labels": [], "duration": 0})
+        ann = _meta_data["annotations"].get(item_id) or _meta_data["annotations"].get(msg_id, {"favourite": False, "labels": []})
         last_ts = _meta_data.get("last_session_timestamp", 0)
         seen_set = set(_meta_data.get("seen_message_ids", []))
         is_seen = (item_id in seen_set) or (msg_id in seen_set)
@@ -67,19 +67,16 @@ def _get_meta(item_id: str, msg_id: str = "", sent_at_ms: int = 0) -> dict:
         return {
             "favourite": bool(ann.get("favourite", False)),
             "labels": list(ann.get("labels", [])),
-            "duration": float(ann.get("duration", 0)),
             "is_new": is_new,
         }
 
 
-def _set_meta(msg_id: str, favourite: bool = None, labels: list = None, duration: float = None):
-    """Updates favourite, labels, or duration for a given message/attachment ID."""
+def _set_meta(msg_id: str, favourite: bool = None, labels: list = None):
+    """Updates favourite or labels for a given message/attachment ID."""
     with _meta_lock:
-        entry = _meta_data["annotations"].setdefault(msg_id, {"favourite": False, "labels": [], "duration": 0})
+        entry = _meta_data["annotations"].setdefault(msg_id, {"favourite": False, "labels": []})
         if favourite is not None:
             entry["favourite"] = bool(favourite)
-        if duration is not None and duration > 0:
-            entry["duration"] = round(float(duration), 2)
         if labels is not None:
             seen = []
             for lbl in labels:

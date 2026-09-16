@@ -18,35 +18,6 @@ class DATA_BLOB(ctypes.Structure):
     ]
 
 
-def dpapi_encrypt(plaintext: bytes) -> bytes:
-    """Encrypts plaintext bytes using current Windows user DPAPI."""
-    p_data_in = DATA_BLOB(
-        len(plaintext),
-        ctypes.cast(
-            ctypes.create_string_buffer(plaintext),
-            ctypes.POINTER(ctypes.c_byte),
-        ),
-    )
-    p_data_out = DATA_BLOB()
-
-    ret = ctypes.windll.crypt32.CryptProtectData(
-        ctypes.byref(p_data_in),
-        None,  # description
-        None,  # optional entropy
-        None,  # reserved
-        None,  # prompt struct
-        0,     # flags
-        ctypes.byref(p_data_out),
-    )
-    if not ret:
-        error_code = ctypes.GetLastError()
-        raise ctypes.WinError(error_code)
-
-    encrypted = ctypes.string_at(p_data_out.pbData, p_data_out.cbData)
-    ctypes.windll.kernel32.LocalFree(p_data_out.pbData)
-    return encrypted
-
-
 def dpapi_decrypt(encrypted_bytes: bytes) -> bytes:
     """Decrypts a DPAPI-protected blob using the current Windows user session.
 
