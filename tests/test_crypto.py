@@ -58,7 +58,7 @@ class TestCryptoPackage(unittest.TestCase):
     def test_decrypt_attachment_hmac_failure(self):
         plaintext = b"Top Secret"
         enc_data = make_encrypted_attachment(plaintext, self.key_b64)
-        corrupted = enc_data[:-1] + b"\x00"
+        corrupted = enc_data[:-1] + bytes([enc_data[-1] ^ 0xFF])
 
         with self.assertRaises(ValueError) as ctx:
             crypto.decrypt_attachment(corrupted, self.key_b64)
