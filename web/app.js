@@ -74,6 +74,13 @@ function esc(s) {
     .replace(/'/g, '&#39;');
 }
 
+function fmtDur(s) {
+  if (!isFinite(s) || s <= 0) return '—:——';
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${String(sec).padStart(2, '0')}`;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Bootstrap & Initialization
 // ─────────────────────────────────────────────────────────────────────────────
@@ -449,6 +456,7 @@ function applyFilter() {
         <div class="play-icon">
           <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
         </div>
+        <div class="dur">${m.duration ? fmtDur(m.duration) : '—:——'}</div>
         ${m.favourite ? '<div class="fav-badge">⭐</div>' : ''}
         ${m.is_new ? '<div class="new-badge">NEW</div>' : ''}
       </div>

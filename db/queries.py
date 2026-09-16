@@ -254,22 +254,23 @@ def _query_media_paged(
                     if not (matches_fn or matches_sender or matches_label):
                         continue
 
-                # Generate derivative URLs
-                from urllib.parse import quote
-                from crypto.cache import DerivedMediaCache
+                # Generate derivative URLs with opaque media tokens
+                from crypto.cache import DerivedMediaCache, encode_media_token
                 if not hasattr(_query_media_paged, "_global_cache"):
                     import os
                     cache_dir = os.path.join(os.environ.get("APPDATA", ""), "Signal", "derived_cache")
                     _query_media_paged._global_cache = DerivedMediaCache(cache_dir=cache_dir)
                 cache = _query_media_paged._global_cache
 
-                poster_params = {'width': 320, 'height': 180, 'format': 'webp', 'quality': 80}
-                poster_key = cache.derive_cache_key(item_id, 'poster', 1, poster_params)
-                poster_url = f"/api/media/derivative/{poster_key}?id={quote(item_id)}&type=poster&w=320&h=180&v=1&fmt=webp&q=80"
+                token = encode_media_token(cache._master_key, item_id, size)
 
-                preview_params = {'width': 320, 'height': 180, 'frames': 5, 'format': 'webp', 'quality': 80}
+                poster_params = {'width': 320, 'height': 180, 'format': 'webp', 'quality': 80, 'size': size}
+                poster_key = cache.derive_cache_key(item_id, 'poster', 1, poster_params)
+                poster_url = f"/api/media/derivative/{poster_key}?token={token}&type=poster&w=320&h=180&v=1&fmt=webp&q=80"
+
+                preview_params = {'width': 320, 'height': 180, 'frames': 5, 'format': 'webp', 'quality': 80, 'size': size}
                 preview_key = cache.derive_cache_key(item_id, 'preview', 1, preview_params)
-                preview_url = f"/api/media/derivative/{preview_key}?id={quote(item_id)}&type=preview&w=320&h=180&frames=5&v=1&fmt=webp&q=80"
+                preview_url = f"/api/media/derivative/{preview_key}?token={token}&type=preview&w=320&h=180&frames=5&v=1&fmt=webp&q=80"
 
                 item = {
                     "id":           item_id,
@@ -280,6 +281,7 @@ def _query_media_paged(
                     "content_type": content_type,
                     "size":         size,
                     "filename":     filename,
+                    "duration":     meta.get("duration", 0),
                     "favourite":    meta["favourite"],
                     "labels":       meta["labels"],
                     "is_new":       meta["is_new"],

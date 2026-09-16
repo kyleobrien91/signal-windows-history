@@ -157,6 +157,50 @@ class TestKeysetPagination(unittest.TestCase):
         self.assertEqual([i["filename"] for i in page2["items"]], ["old1.mp4"])
         self.assertFalse(page2["has_more"])
 
+    def test_db_query_execution_contains_explicit_limit(self):
+        # Insert 100 items
+        for i in range(1, 101):
+            self._insert_attachment(f"m{i}", i * 1000, f"vid{i}.mp4", rowid=i)
+
+        executed_sql = []
+        orig_cur = db_q._db_cur
+
+        class MockCursorWrapper:
+            def __init__(self, real_cur):
+                self.real_cur = real_cur
+
+            def execute(self, sql, params=()):
+                executed_sql.append((sql, params))
+                return self.real_cur.execute(sql, params)
+
+            def fetchall(self):
+                return self.real_cur.fetchall()
+
+            def fetchone(self):
+                return self.real_cur.fetchone()
+
+        db_q._db_cur = MockCursorWrapper(self.cur)
+
+        try:
+            page, _ = db_q.query_media_paged(group_id='conv1', limit=10)
+            self.assertEqual(len(page["items"]), 10)
+            self.assertTrue(page["has_more"])
+
+            # Find media query SQL
+            media_queries = [s for s, p in executed_sql if "FROM message_attachments" in s]
+            self.assertGreater(len(media_queries), 0)
+
+            # Assert every executed media query contains explicit LIMIT clause
+            for sql in media_queries:
+                self.assertIn("LIMIT ?", sql)
+
+            # Assert params for LIMIT parameter do not exceed chunk_size (<= 50)
+            limit_params = [p[-1] for s, p in executed_sql if "LIMIT ?" in s]
+            for lp in limit_params:
+                self.assertLessEqual(lp, 50)
+        finally:
+            db_q._db_cur = orig_cur
+
     def test_malformed_cursor_rejection(self):
         with self.assertRaises(ValueError):
             db_q.decode_cursor("invalid_base64!!!")

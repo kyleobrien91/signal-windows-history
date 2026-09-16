@@ -477,14 +477,33 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_error(500, str(e))
 
     def _serve_derivative(self, cache_key: str, qs: dict):
-        media_id = qs.get('id', [None])[0]
-        if not media_id:
-            self.send_error(400, "Missing media id parameter")
+        token_str = qs.get('token', [None])[0]
+        if not token_str:
+            self.send_error(400, "Missing media token parameter")
+            return
+
+        from crypto.cache import DerivedMediaCache, decode_media_token
+        if not hasattr(_Handler, "_global_cache"):
+            cache_dir = os.path.join(os.environ.get("APPDATA", ""), "Signal", "derived_cache")
+            _Handler._global_cache = DerivedMediaCache(cache_dir=cache_dir)
+        cache = _Handler._global_cache
+
+        try:
+            media_id, token_size = decode_media_token(cache._master_key, token_str)
+        except ValueError as e:
+            self.send_error(400, f"Invalid media token: {e}")
             return
 
         entry = _get_media_lookup_entry(media_id)
         if not entry:
             self.send_error(404, "Media not found")
+            return
+
+        rel_path, local_key, size, content_type = entry
+        enc_path = os.path.join(_attach_root, rel_path)
+
+        if not os.path.exists(enc_path):
+            self.send_error(404, "Attachment missing on disk")
             return
 
         deriv_type = qs.get('type', ['poster'])[0]
@@ -512,23 +531,15 @@ class _Handler(BaseHTTPRequestHandler):
             'height': height,
             'format': fmt,
             'quality': quality,
+            'size': size,
         }
         if deriv_type == 'preview':
             params['frames'] = frames
-
-        from crypto.cache import DerivedMediaCache
-        if not hasattr(_Handler, "_global_cache"):
-            cache_dir = os.path.join(os.environ.get("APPDATA", ""), "Signal", "derived_cache")
-            _Handler._global_cache = DerivedMediaCache(cache_dir=cache_dir)
-        cache = _Handler._global_cache
 
         expected_key = cache.derive_cache_key(media_id, deriv_type, version, params)
         if expected_key != cache_key:
             self.send_error(400, "Cache key mismatch for specified parameters")
             return
-
-        rel_path, local_key, size, content_type = entry
-        enc_path = os.path.join(_attach_root, rel_path)
 
         def _generate():
             from crypto.attachment import decrypt_attachment

@@ -340,17 +340,18 @@ def test_derivative_endpoint_security_and_headers(test_key):
         player_server._attach_root = ""
 
         # Initialize cache
-        from crypto.cache import DerivedMediaCache
+        from crypto.cache import DerivedMediaCache, encode_media_token
         tmp_cache_dir = tempfile.mkdtemp()
         cache = DerivedMediaCache(cache_dir=tmp_cache_dir)
         player_server._Handler._global_cache = cache
 
-        poster_params = {'width': 320, 'height': 180, 'format': 'webp', 'quality': 80}
+        poster_params = {'width': 320, 'height': 180, 'format': 'webp', 'quality': 80, 'size': len(plaintext)}
         valid_key = cache.derive_cache_key(msg_id, 'poster', 1, poster_params)
+        token = encode_media_token(cache._master_key, msg_id, len(plaintext))
 
         # 1. Valid derivative request
         qs = {
-            'id': [msg_id],
+            'token': [token],
             'type': ['poster'],
             'w': ['320'],
             'h': ['180'],
@@ -373,7 +374,8 @@ def test_derivative_endpoint_security_and_headers(test_key):
         assert handler.error_code == 400
 
         # 3. Missing/Unauthorized media_id -> 404 Not Found
-        unauth_qs = dict(qs, id=['unauthorized_msg'])
+        unauth_token = encode_media_token(cache._master_key, 'unauthorized_msg', 100)
+        unauth_qs = dict(qs, token=[unauth_token])
         handler = MockHTTPHandler()
         player_server._Handler._serve_derivative(handler, valid_key, unauth_qs)
         assert handler.error_code == 404

@@ -7,6 +7,7 @@ opaque HMAC keys, atomic writes, tamper detection, disposability, and
 single-flight request deduplication under concurrency.
 """
 
+import base64
 from collections import OrderedDict
 import hashlib
 import hmac
@@ -22,6 +23,34 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from crypto.key_provider import get_cache_master_key
+
+
+def encode_media_token(master_key: bytes, attachment_id: str, size: int = 0) -> str:
+    """Encodes attachment_id and size into an opaque HMAC-authenticated Base64 string."""
+    payload = json.dumps({"id": attachment_id, "sz": int(size)}, separators=(',', ':')).encode('utf-8')
+    sig = hmac.new(master_key, payload, hashlib.sha256).digest()
+    p_b64 = base64.urlsafe_b64encode(payload).decode('ascii').rstrip('=')
+    s_b64 = base64.urlsafe_b64encode(sig).decode('ascii').rstrip('=')
+    return f"{p_b64}.{s_b64}"
+
+
+def decode_media_token(master_key: bytes, token_str: str) -> Tuple[str, int]:
+    """Decodes and validates an opaque media token into (attachment_id, size)."""
+    if not token_str or "." not in token_str:
+        raise ValueError("Empty or malformed media token")
+    try:
+        p_b64, s_b64 = token_str.split(".", 1)
+        p_b64 += "=" * ((4 - len(p_b64) % 4) % 4)
+        s_b64 += "=" * ((4 - len(s_b64) % 4) % 4)
+        payload = base64.urlsafe_b64decode(p_b64.encode('ascii'))
+        sig = base64.urlsafe_b64decode(s_b64.encode('ascii'))
+        expected_sig = hmac.new(master_key, payload, hashlib.sha256).digest()
+        if not hmac.compare_digest(sig, expected_sig):
+            raise ValueError("Media token HMAC signature verification failed")
+        data = json.loads(payload.decode('utf-8'))
+        return str(data["id"]), int(data.get("sz", 0))
+    except Exception as e:
+        raise ValueError(f"Invalid media token: {e}")
 
 
 class SingleFlightEntry:
@@ -66,6 +95,7 @@ class DerivedMediaCache:
         self.db_path = os.path.join(self.cache_dir, "index.db")
         self._db_lock = threading.RLock()
         self._init_db()
+        self.reconcile_orphaned_blobs()
 
         # Single-flight request deduplication state
         self._single_flight_lock = threading.Lock()
@@ -83,33 +113,42 @@ class DerivedMediaCache:
                 except Exception:
                     pass
 
+    def _ensure_schema(self, conn: sqlite3.Connection):
+        """Ensures cache_entries schema and indexes exist."""
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS cache_entries (
+                cache_key TEXT PRIMARY KEY,
+                attachment_key TEXT NOT NULL,
+                derivative_type TEXT NOT NULL,
+                generator_version INTEGER NOT NULL,
+                parameters_json TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                created_at REAL NOT NULL,
+                last_accessed_at REAL NOT NULL
+            );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_attachment ON cache_entries(attachment_key);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_lru ON cache_entries(last_accessed_at);")
+
     def _get_db_conn(self) -> sqlite3.Connection:
-        """Returns SQLite connection to index DB, resetting database schema on corruption."""
+        """Returns SQLite connection to index DB, resetting database schema ONLY on actual corruption."""
         try:
             conn = sqlite3.connect(self.db_path, timeout=10.0)
             conn.execute("PRAGMA journal_mode = WAL;")
             conn.execute("PRAGMA synchronous = NORMAL;")
-            # Test schema validity
-            conn.execute("SELECT COUNT(*) FROM cache_entries;")
+            cur = conn.cursor()
+            cur.execute("PRAGMA quick_check;")
+            res = cur.fetchone()
+            if res and res[0] not in ("ok", "ok\n"):
+                conn.close()
+                raise sqlite3.DatabaseError(f"Integrity check failed: {res[0]}")
+            self._ensure_schema(conn)
             return conn
-        except sqlite3.Error:
+        except sqlite3.DatabaseError:
             self._reset_db()
             conn = sqlite3.connect(self.db_path, timeout=10.0)
             conn.execute("PRAGMA journal_mode = WAL;")
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS cache_entries (
-                    cache_key TEXT PRIMARY KEY,
-                    attachment_key TEXT NOT NULL,
-                    derivative_type TEXT NOT NULL,
-                    generator_version INTEGER NOT NULL,
-                    parameters_json TEXT NOT NULL,
-                    size_bytes INTEGER NOT NULL,
-                    created_at REAL NOT NULL,
-                    last_accessed_at REAL NOT NULL
-                );
-            """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_attachment ON cache_entries(attachment_key);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_lru ON cache_entries(last_accessed_at);")
+            self._ensure_schema(conn)
             return conn
 
     def _init_db(self):
@@ -439,6 +478,43 @@ class DerivedMediaCache:
                     conn.execute("DELETE FROM cache_entries WHERE attachment_key = ?;", (att_key,))
             finally:
                 conn.close()
+
+    def reconcile_orphaned_blobs(self):
+        """Reconciles disk blob files and SQLite index entries, removing orphans."""
+        with self._db_lock:
+            try:
+                conn = self._get_db_conn()
+                try:
+                    cur = conn.cursor()
+                    cur.execute("SELECT cache_key FROM cache_entries;")
+                    indexed_keys = set(r[0] for r in cur.fetchall())
+
+                    # 1. Purge orphaned blob files on disk with no DB index row
+                    if os.path.exists(self.blobs_dir):
+                        for fname in os.listdir(self.blobs_dir):
+                            if fname.endswith(".bin"):
+                                key = fname[:-4]
+                                if key not in indexed_keys:
+                                    try:
+                                        os.remove(os.path.join(self.blobs_dir, fname))
+                                    except Exception:
+                                        pass
+
+                    # 2. Purge stale index rows in DB with no blob file on disk
+                    stale_keys = []
+                    for key in indexed_keys:
+                        blob_path = os.path.join(self.blobs_dir, f"{key}.bin")
+                        if not os.path.exists(blob_path):
+                            stale_keys.append(key)
+
+                    if stale_keys:
+                        with conn:
+                            for sk in stale_keys:
+                                conn.execute("DELETE FROM cache_entries WHERE cache_key = ?;", (sk,))
+                finally:
+                    conn.close()
+            except sqlite3.Error:
+                self._reset_db()
 
     def clear(self):
         """Clears all L1 and L2 cache entries."""
