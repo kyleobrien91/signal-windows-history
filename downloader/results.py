@@ -32,6 +32,10 @@ class DownloadResult:
     initial_pending: int = 0
     pending_remaining: int = 0
     downloaded_count: int = 0
+    rate: float = 0.0
+    eta_seconds: Optional[float] = None
+    elapsed_seconds: float = 0.0
+    tracked_pid: Optional[int] = None
     error_message: Optional[str] = None
     exception: Optional[Exception] = None
 

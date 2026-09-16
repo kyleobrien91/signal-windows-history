@@ -1,5 +1,6 @@
 import asyncio
 import io
+import subprocess
 import sys
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -228,6 +229,223 @@ class TestDownloader(unittest.TestCase):
         res = dispatcher.run_headless_download("db.sqlite", "key")
         self.assertTrue(res)
         self.assertEqual(res.status, ItemResultStatus.SKIPPED)
+
+
+class TestRateEstimatorAndProgress(unittest.TestCase):
+
+    def test_rate_estimator_insufficient_samples(self):
+        estimator = dispatcher.RateEstimator()
+        estimator.add_sample(100.0, 50)
+        rate, eta_sec, eta_str = estimator.get_rate_and_eta(50, 50)
+        self.assertEqual(rate, 0.0)
+        self.assertIsNone(eta_sec)
+        self.assertEqual(eta_str, "ETA calculating...")
+
+    def test_rate_estimator_valid_samples(self):
+        estimator = dispatcher.RateEstimator(window_seconds=15.0)
+        estimator.add_sample(100.0, 50)
+        estimator.add_sample(105.0, 40)
+        rate, eta_sec, eta_str = estimator.get_rate_and_eta(50, 40)
+        self.assertEqual(rate, 2.0)
+        self.assertEqual(eta_sec, 20.0)
+        self.assertEqual(eta_str, "ETA 00:20")
+
+    def test_rate_estimator_completion(self):
+        estimator = dispatcher.RateEstimator()
+        estimator.add_sample(100.0, 50)
+        estimator.add_sample(110.0, 0)
+        rate, eta_sec, eta_str = estimator.get_rate_and_eta(50, 0)
+        self.assertEqual(eta_sec, 0.0)
+        self.assertEqual(eta_str, "ETA 00:00")
+
+    def test_rate_estimator_stalled_window_returns_zero_rate_and_calculating_eta(self):
+        estimator = dispatcher.RateEstimator(window_seconds=15.0)
+        estimator.add_sample(100.0, 50)
+        estimator.add_sample(105.0, 40)
+        # Stalled for 20 seconds, old samples drop out of 15s window
+        estimator.add_sample(125.0, 40)
+        rate, eta_sec, eta_str = estimator.get_rate_and_eta(50, 40)
+        self.assertEqual(rate, 0.0)
+        self.assertIsNone(eta_sec)
+        self.assertEqual(eta_str, "ETA calculating...")
+
+
+class TestManagedDownloadLifecycle(unittest.TestCase):
+
+    @patch("downloader.dispatcher.query_pending_video_groups")
+    @patch("downloader.dispatcher.is_signal_running")
+    def test_no_pending_media_succeeds_cleanly(self, mock_is_running, mock_query):
+        mock_is_running.return_value = False
+        mock_query.return_value = []
+
+        stdout_buf = io.StringIO()
+        with patch("sys.stdout", stdout_buf):
+            res = dispatcher.run_managed_download(db_path="dummy_db", key="dummy_key")
+
+        self.assertTrue(res)
+        self.assertEqual(res.status, ItemResultStatus.SKIPPED)
+        self.assertIn("Outstanding media: 0", stdout_buf.getvalue())
+        self.assertIn("All media is already downloaded.", stdout_buf.getvalue())
+
+    @patch("downloader.dispatcher.safely_stop_signal_processes", return_value=True)
+    @patch("downloader.dispatcher.get_signal_pids", return_value=([12345], None))
+    def test_kill_signal_handles_tuple_contract_and_returns_boolean(self, mock_pids, mock_stop):
+        from player.server import kill_signal
+        res = kill_signal()
+        self.assertTrue(res)
+        mock_stop.assert_called_once_with([12345])
+
+    @patch("player.server.kill_signal", return_value=False)
+    @patch("downloader.dispatcher.get_signal_pids", return_value=([12345], None))
+    def test_run_managed_download_aborts_if_running_signal_shutdown_fails(self, mock_pids, mock_kill):
+        res = dispatcher.run_managed_download(db_path="dummy_db", key="dummy_key")
+        self.assertFalse(res)
+        self.assertEqual(res.status, ItemResultStatus.FAILED)
+        self.assertIn("Could not verify shutdown of running Signal process", res.error_message)
+
+    @patch("subprocess.check_output", side_effect=subprocess.CalledProcessError(1, "tasklist", output="tasklist error"))
+    def test_run_managed_download_fails_closed_on_tasklist_failure(self, mock_tasklist):
+        res = dispatcher.run_managed_download(db_path="dummy_db", key="dummy_key")
+        self.assertFalse(res)
+        self.assertEqual(res.status, ItemResultStatus.FAILED)
+        self.assertIn("Process state lookup failed", res.error_message)
+
+    @patch("subprocess.check_output", side_effect=OSError("netstat error"))
+    def test_verify_cdp_port_owner_fails_closed_on_error(self, mock_netstat):
+        self.assertFalse(dispatcher.verify_cdp_port_owner(9222, 12345))
+
+    @patch("downloader.dispatcher.verify_cdp_port_owner", return_value=False)
+    @patch("downloader.dispatcher.get_cdp_target")
+    def test_run_headless_download_reverifies_and_rejects_unowned_pid(self, mock_get_cdp, mock_verify):
+        mock_get_cdp.return_value = {"webSocketDebuggerUrl": "ws://localhost:9222/page/1"}
+        mock_proc = MagicMock()
+        mock_proc.pid = 99999
+
+        res = dispatcher.run_headless_download("db.sqlite", "key", managed_proc=mock_proc)
+        self.assertFalse(res)
+        self.assertEqual(res.status, ItemResultStatus.FAILED)
+        self.assertIn("ownership re-verification failed", res.error_message)
+
+    @patch("downloader.dispatcher.get_cdp_target")
+    def test_start_managed_signal_cdp_fails_if_unmanaged_port_in_use(self, mock_get_cdp):
+        mock_get_cdp.return_value = {"webSocketDebuggerUrl": "ws://localhost:9222/page/1"}
+        proc, err = dispatcher.start_managed_signal_cdp(cdp_port=9222)
+        self.assertIsNone(proc)
+        self.assertIn("already in use by an unmanaged CDP endpoint", err)
+
+    @patch("downloader.dispatcher.get_cdp_target")
+    @patch("subprocess.Popen")
+    def test_stop_managed_signal_cdp_verifies_port_cleanup(self, mock_popen, mock_get_cdp):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        # Target exists initially, then becomes None after cleanup
+        mock_get_cdp.side_effect = [{"webSocketDebuggerUrl": "ws://localhost:9222"}, None]
+
+        dispatcher.stop_managed_signal_cdp(mock_proc, relaunch_normal=False, cdp_port=9222)
+        mock_proc.terminate.assert_called_once()
+
+    @patch("downloader.dispatcher.start_managed_signal_cdp")
+    @patch("downloader.dispatcher.is_signal_running")
+    @patch("downloader.dispatcher.query_pending_video_groups")
+    def test_cdp_startup_failure_reports_failed_status(self, mock_query, mock_is_running, mock_start_cdp):
+        mock_is_running.return_value = False
+        mock_query.return_value = [("c1", "Group 1", 5)]
+        mock_start_cdp.return_value = (None, "Port 9222 bound")
+
+        stderr_buf = io.StringIO()
+        with patch("sys.stderr", stderr_buf):
+            res = dispatcher.run_managed_download(db_path="dummy_db", key="dummy_key")
+
+        self.assertFalse(res)
+        self.assertEqual(res.status, ItemResultStatus.FAILED)
+        self.assertIn("CDP startup failed", res.error_message)
+
+    @patch("downloader.dispatcher.stop_managed_signal_cdp")
+    @patch("downloader.dispatcher.run_headless_download")
+    @patch("downloader.dispatcher.start_managed_signal_cdp")
+    @patch("downloader.dispatcher.query_pending_video_groups")
+    @patch("downloader.dispatcher.is_signal_running")
+    def test_cdp_cleanup_and_session_restore_on_completion(self, mock_is_running, mock_query, mock_start_cdp, mock_run_hl, mock_stop_cdp):
+        mock_is_running.return_value = True
+        mock_query.return_value = [("c1", "Group 1", 3)]
+        mock_proc = MagicMock()
+        mock_proc.pid = 12345
+        mock_start_cdp.return_value = (mock_proc, None)
+
+        mock_run_hl.return_value = DownloadResult(
+            success=True,
+            status=ItemResultStatus.SUCCESS,
+            initial_pending=3,
+            pending_remaining=0,
+            downloaded_count=3,
+            tracked_pid=12345
+        )
+
+        res = dispatcher.run_managed_download(db_path="dummy_db", key="dummy_key")
+
+        self.assertTrue(res)
+        self.assertEqual(res.tracked_pid, 12345)
+        mock_stop_cdp.assert_called_once_with(mock_proc, relaunch_normal=True)
+
+
+class TestPlayerStartupMenuAndCLI(unittest.TestCase):
+
+    @patch("downloader.run_managed_download")
+    @patch("player.server.is_signal_running")
+    @patch("player.server.ThreadingHTTPServer")
+    @patch("webbrowser.open")
+    def test_cli_flag_download_only_runs_managed_download_and_exits(self, mock_browser, mock_http, mock_is_running, mock_run_managed):
+        mock_is_running.return_value = False
+        mock_run_managed.return_value = DownloadResult(success=True, status=ItemResultStatus.SUCCESS)
+
+        test_args = ["player.server", "--download-only"]
+        with patch.object(sys, "argv", test_args):
+            with self.assertRaises(SystemExit) as ctx:
+                import player.server
+                player.server.main()
+
+            self.assertEqual(ctx.exception.code, 0)
+            mock_run_managed.assert_called_once_with(show_progress=True)
+            mock_http.assert_not_called()
+            mock_browser.assert_not_called()
+
+    @patch("downloader.run_managed_download")
+    @patch("player.server.is_signal_running")
+    @patch("player.server.ThreadingHTTPServer")
+    @patch("webbrowser.open")
+    def test_menu_running_option_4_runs_download_only(self, mock_browser, mock_http, mock_is_running, mock_run_managed):
+        mock_is_running.return_value = True
+        mock_run_managed.return_value = DownloadResult(success=True, status=ItemResultStatus.SUCCESS)
+
+        test_args = ["player.server"]
+        with patch.object(sys, "argv", test_args), patch("builtins.input", return_value="4"):
+            with self.assertRaises(SystemExit) as ctx:
+                import player.server
+                player.server.main()
+
+            self.assertEqual(ctx.exception.code, 0)
+            mock_run_managed.assert_called_once_with(show_progress=True)
+            mock_http.assert_not_called()
+            mock_browser.assert_not_called()
+
+    @patch("downloader.run_managed_download")
+    @patch("player.server.is_signal_running")
+    @patch("player.server.ThreadingHTTPServer")
+    @patch("webbrowser.open")
+    def test_menu_not_running_option_3_runs_download_only(self, mock_browser, mock_http, mock_is_running, mock_run_managed):
+        mock_is_running.return_value = False
+        mock_run_managed.return_value = DownloadResult(success=True, status=ItemResultStatus.SUCCESS)
+
+        test_args = ["player.server"]
+        with patch.object(sys, "argv", test_args), patch("builtins.input", return_value="3"):
+            with self.assertRaises(SystemExit) as ctx:
+                import player.server
+                player.server.main()
+
+            self.assertEqual(ctx.exception.code, 0)
+            mock_run_managed.assert_called_once_with(show_progress=True)
+            mock_http.assert_not_called()
+            mock_browser.assert_not_called()
 
 
 if __name__ == "__main__":
