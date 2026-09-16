@@ -106,7 +106,7 @@ def safely_stop_signal_processes(pids: Optional[List[int]] = None, timeout: floa
 
 
 def verify_cdp_port_owner(port: int, expected_pid: int) -> bool:
-    """Verifies via netstat that the given CDP port is being listened to by expected_pid."""
+    """Verifies via netstat that the given CDP port is being listened to by expected_pid. Fails closed on error."""
     try:
         out = subprocess.check_output(
             ["netstat", "-ano"],
@@ -126,7 +126,8 @@ def verify_cdp_port_owner(port: int, expected_pid: int) -> bool:
                         pass
         return False
     except Exception:
-        return True
+        # Fail closed on inability to verify ownership
+        return False
 
 
 def get_signal_exe_path() -> str:
@@ -575,6 +576,16 @@ def run_headless_download(
             status=ItemResultStatus.FAILED,
             tracked_pid=managed_proc.pid if managed_proc else None,
             error_message=f"Could not connect to Signal on port {cdp_port}"
+        )
+
+    if managed_proc and not verify_cdp_port_owner(cdp_port, managed_proc.pid):
+        if not show_progress:
+            print(f"[Headless Downloader] Security error: CDP endpoint on port {cdp_port} does not belong to expected PID {managed_proc.pid}.", file=sys.stderr)
+        return DownloadResult(
+            success=False,
+            status=ItemResultStatus.FAILED,
+            tracked_pid=managed_proc.pid,
+            error_message=f"CDP endpoint ownership re-verification failed for PID {managed_proc.pid}"
         )
 
     ws_url = target.get("webSocketDebuggerUrl")

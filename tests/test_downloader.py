@@ -286,6 +286,22 @@ class TestManagedDownloadLifecycle(unittest.TestCase):
         self.assertIn("Outstanding media: 0", stdout_buf.getvalue())
         self.assertIn("All media is already downloaded.", stdout_buf.getvalue())
 
+    @patch("subprocess.check_output", side_effect=OSError("netstat error"))
+    def test_verify_cdp_port_owner_fails_closed_on_error(self, mock_netstat):
+        self.assertFalse(dispatcher.verify_cdp_port_owner(9222, 12345))
+
+    @patch("downloader.dispatcher.verify_cdp_port_owner", return_value=False)
+    @patch("downloader.dispatcher.get_cdp_target")
+    def test_run_headless_download_reverifies_and_rejects_unowned_pid(self, mock_get_cdp, mock_verify):
+        mock_get_cdp.return_value = {"webSocketDebuggerUrl": "ws://localhost:9222/page/1"}
+        mock_proc = MagicMock()
+        mock_proc.pid = 99999
+
+        res = dispatcher.run_headless_download("db.sqlite", "key", managed_proc=mock_proc)
+        self.assertFalse(res)
+        self.assertEqual(res.status, ItemResultStatus.FAILED)
+        self.assertIn("ownership re-verification failed", res.error_message)
+
     @patch("downloader.dispatcher.get_cdp_target")
     def test_start_managed_signal_cdp_fails_if_unmanaged_port_in_use(self, mock_get_cdp):
         mock_get_cdp.return_value = {"webSocketDebuggerUrl": "ws://localhost:9222/page/1"}
