@@ -36,6 +36,8 @@ class TestPackageAPIsAndExports(unittest.TestCase):
             "decrypt_attachment",
             "inspect_attachment",
             "stream_attachment_range",
+            "DerivedMediaCache",
+            "get_cache_master_key",
         ]
         self.assertEqual(crypto.__all__, expected)
         for name in expected:
