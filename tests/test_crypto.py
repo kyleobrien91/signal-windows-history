@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+import io
 import json
 import os
 import tempfile
@@ -12,6 +13,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 import crypto
 from crypto.attachment import decrypt_attachment, inspect_attachment, stream_attachment_range
+from crypto.derivatives import inspect_video_duration
 from crypto.key import _CACHE_MAX, _cache, _cache_lock, _get_cached, get_signal_key
 
 
@@ -169,6 +171,45 @@ class TestCryptoPackage(unittest.TestCase):
             with patch.dict(os.environ, {"APPDATA": tmpdir}):
                 key = get_signal_key()
                 self.assertEqual(key, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+
+    def test_inspect_video_duration_success(self):
+        # Create a tiny dummy video payload wrapped in Signal attachment encryption format
+        # Create synthetic valid video bytes or mock PyAV container to test real inspection returning non-zero duration
+        try:
+            import av
+        except ImportError:
+            self.skipTest("PyAV ('av') is not installed")
+
+        # Generate a minimal valid MP4 video in memory using PyAV
+        buf = io.BytesIO()
+        container = av.open(buf, mode='w', format='mp4')
+        stream = container.add_stream('h264', rate=30)
+        stream.width = 160
+        stream.height = 120
+        stream.pix_fmt = 'yuv420p'
+
+        for i in range(30):  # 1 second video at 30 fps
+            frame = av.VideoFrame(160, 120, 'yuv420p')
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+        container.close()
+
+        mp4_bytes = buf.getvalue()
+        enc_data = make_encrypted_attachment(mp4_bytes, self.key_b64)
+
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            f.write(enc_data)
+            enc_path = f.name
+
+        try:
+            dur = inspect_video_duration(enc_path, self.key_b64, len(mp4_bytes))
+            self.assertGreater(dur, 0.0)
+            self.assertAlmostEqual(dur, 1.0, delta=0.5)
+        finally:
+            if os.path.exists(enc_path):
+                os.unlink(enc_path)
 
     def test_inspect_and_stream_attachment_range(self):
         plaintext = b"Chunk 1 payload " * 100  # 1600 bytes

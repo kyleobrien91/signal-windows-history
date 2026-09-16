@@ -7,6 +7,7 @@ in RAM without writing temporary plaintext files to disk.
 """
 
 import io
+import os
 from typing import List, Tuple
 from PIL import Image
 
