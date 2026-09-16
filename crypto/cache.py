@@ -24,6 +24,14 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from crypto.key_provider import get_cache_master_key
 
 
+class SingleFlightEntry:
+
+    def __init__(self):
+        self.event = threading.Event()
+        self.result: Optional[bytes] = None
+        self.exception: Optional[Exception] = None
+
+
 class DerivedMediaCache:
     """Bounded encrypted derived-media cache with L1 RAM and L2 disk storage."""
 
@@ -61,52 +69,61 @@ class DerivedMediaCache:
 
         # Single-flight request deduplication state
         self._single_flight_lock = threading.Lock()
-        self._in_flight: Dict[str, threading.Condition] = {}
+        self._in_flight: Dict[str, "SingleFlightEntry"] = {}
 
     # ── Database Initialization & Connection ─────────────────────────
 
+    def _reset_db(self):
+        """Completely removes corrupt database and WAL files and re-initializes schema."""
+        for ext in ("", "-wal", "-shm"):
+            fpath = self.db_path + ext
+            if os.path.exists(fpath):
+                try:
+                    os.remove(fpath)
+                except Exception:
+                    pass
+
     def _get_db_conn(self) -> sqlite3.Connection:
-        """Returns SQLite connection to index DB, auto-recreating if corrupt."""
+        """Returns SQLite connection to index DB, resetting database schema on corruption."""
         try:
             conn = sqlite3.connect(self.db_path, timeout=10.0)
             conn.execute("PRAGMA journal_mode = WAL;")
             conn.execute("PRAGMA synchronous = NORMAL;")
+            # Test schema validity
+            conn.execute("SELECT COUNT(*) FROM cache_entries;")
             return conn
-        except Exception:
-            # Recreate DB on corruption
-            if os.path.exists(self.db_path):
-                try:
-                    os.remove(self.db_path)
-                except Exception:
-                    pass
+        except sqlite3.Error:
+            self._reset_db()
             conn = sqlite3.connect(self.db_path, timeout=10.0)
             conn.execute("PRAGMA journal_mode = WAL;")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS cache_entries (
+                    cache_key TEXT PRIMARY KEY,
+                    attachment_key TEXT NOT NULL,
+                    derivative_type TEXT NOT NULL,
+                    generator_version INTEGER NOT NULL,
+                    parameters_json TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    created_at REAL NOT NULL,
+                    last_accessed_at REAL NOT NULL
+                );
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_attachment ON cache_entries(attachment_key);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_lru ON cache_entries(last_accessed_at);")
             return conn
 
     def _init_db(self):
         """Initializes SQLite cache index schema."""
         with self._db_lock:
             conn = self._get_db_conn()
-            try:
-                with conn:
-                    conn.execute("""
-                        CREATE TABLE IF NOT EXISTS cache_entries (
-                            cache_key TEXT PRIMARY KEY,
-                            attachment_id TEXT NOT NULL,
-                            derivative_type TEXT NOT NULL,
-                            generator_version INTEGER NOT NULL,
-                            parameters_json TEXT NOT NULL,
-                            size_bytes INTEGER NOT NULL,
-                            created_at REAL NOT NULL,
-                            last_accessed_at REAL NOT NULL
-                        );
-                    """)
-                    conn.execute("CREATE INDEX IF NOT EXISTS idx_attachment ON cache_entries(attachment_id);")
-                    conn.execute("CREATE INDEX IF NOT EXISTS idx_lru ON cache_entries(last_accessed_at);")
-            finally:
-                conn.close()
+            conn.close()
 
     # ── Key Derivation & Cryptography ─────────────────────────────────
+
+    def derive_attachment_key(self, attachment_id: str) -> str:
+        """Derives an opaque HMAC key for attachment indexing and invalidation."""
+        h = hmac.new(self._master_key, f"att|{attachment_id}".encode('utf-8'), hashlib.sha256)
+        return h.hexdigest()
 
     def derive_cache_key(
         self,
@@ -117,7 +134,7 @@ class DerivedMediaCache:
     ) -> str:
         """Derives a cryptographically opaque HMAC cache key.
 
-        Ensures raw attachment paths, filenames, or IDs never appear in cache keys or filenames.
+        Ensures raw attachment paths, filenames, or IDs never appear in cache keys, index DB, or filenames.
         """
         sorted_params = json.dumps(params or {}, sort_keys=True, separators=(',', ':'))
         canonical_str = f"{attachment_id}|{derivative_type}|{generator_version}|{sorted_params}"
@@ -223,40 +240,44 @@ class DerivedMediaCache:
 
         now = time.time()
         with self._db_lock:
-            conn = self._get_db_conn()
             try:
-                cur = conn.cursor()
-                cur.execute("SELECT attachment_id FROM cache_entries WHERE cache_key = ?;", (cache_key,))
-                row = cur.fetchone()
-                if not row:
-                    # Orphaned blob file without DB entry
-                    try:
-                        os.remove(blob_path)
-                    except Exception:
-                        pass
-                    return None
-
-                # Read encrypted blob
+                conn = self._get_db_conn()
                 try:
-                    with open(blob_path, "rb") as f:
-                        encrypted_bytes = f.read()
-                    plaintext = self._decrypt_blob(cache_key, encrypted_bytes)
-                except Exception:
-                    # Blob file missing, tampered, or corrupt -> remove entry and return None (miss)
-                    cur.execute("DELETE FROM cache_entries WHERE cache_key = ?;", (cache_key,))
-                    conn.commit()
-                    if os.path.exists(blob_path):
+                    cur = conn.cursor()
+                    cur.execute("SELECT attachment_key FROM cache_entries WHERE cache_key = ?;", (cache_key,))
+                    row = cur.fetchone()
+                    if not row:
+                        # Orphaned blob file without DB entry
                         try:
                             os.remove(blob_path)
                         except Exception:
                             pass
-                    return None
+                        return None
 
-                # Update LRU access timestamp
-                cur.execute("UPDATE cache_entries SET last_accessed_at = ? WHERE cache_key = ?;", (now, cache_key))
-                conn.commit()
-            finally:
-                conn.close()
+                    # Read encrypted blob
+                    try:
+                        with open(blob_path, "rb") as f:
+                            encrypted_bytes = f.read()
+                        plaintext = self._decrypt_blob(cache_key, encrypted_bytes)
+                    except Exception:
+                        # Blob file missing, tampered, or corrupt -> remove entry and return None (miss)
+                        cur.execute("DELETE FROM cache_entries WHERE cache_key = ?;", (cache_key,))
+                        conn.commit()
+                        if os.path.exists(blob_path):
+                            try:
+                                os.remove(blob_path)
+                            except Exception:
+                                pass
+                        return None
+
+                    # Update LRU access timestamp
+                    cur.execute("UPDATE cache_entries SET last_accessed_at = ? WHERE cache_key = ?;", (now, cache_key))
+                    conn.commit()
+                finally:
+                    conn.close()
+            except sqlite3.Error:
+                self._reset_db()
+                return None
 
         # Store in L1 RAM cache and return
         self._l1_put(cache_key, plaintext)
@@ -295,7 +316,8 @@ class DerivedMediaCache:
                         pass
                 raise
 
-            # Insert/update in SQLite index
+            # Insert/update in SQLite index using opaque attachment_key
+            att_key = self.derive_attachment_key(attachment_id)
             params_json = json.dumps(params or {}, sort_keys=True)
             with self._db_lock:
                 conn = self._get_db_conn()
@@ -303,9 +325,9 @@ class DerivedMediaCache:
                     with conn:
                         conn.execute("""
                             INSERT OR REPLACE INTO cache_entries
-                            (cache_key, attachment_id, derivative_type, generator_version, parameters_json, size_bytes, created_at, last_accessed_at)
+                            (cache_key, attachment_key, derivative_type, generator_version, parameters_json, size_bytes, created_at, last_accessed_at)
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?);
-                        """, (cache_key, attachment_id, derivative_type, generator_version, params_json, enc_size, now, now))
+                        """, (cache_key, att_key, derivative_type, generator_version, params_json, enc_size, now, now))
                         self._enforce_l2_limits(conn)
                 finally:
                     conn.close()
@@ -321,7 +343,7 @@ class DerivedMediaCache:
         params: dict,
         generator_func: Callable[[], bytes],
     ) -> Tuple[str, bytes]:
-        """Gets derivative from cache or deduplicates concurrent generation.
+        """Gets derivative from cache or deduplicates concurrent generation using explicit Result propagation.
 
         Returns (cache_key, plaintext_bytes).
         """
@@ -332,9 +354,9 @@ class DerivedMediaCache:
         if hit is not None:
             return cache_key, hit
 
-        # 2. Concurrency single-flight deduplication
+        # 2. Concurrency single-flight deduplication with explicit Event/Future result
         is_leader = False
-        cond = None
+        entry = None
 
         with self._single_flight_lock:
             # Re-check cache under lock
@@ -343,33 +365,37 @@ class DerivedMediaCache:
                 return cache_key, hit
 
             if cache_key in self._in_flight:
-                cond = self._in_flight[cache_key]
+                entry = self._in_flight[cache_key]
             else:
-                cond = threading.Condition(self._single_flight_lock)
-                self._in_flight[cache_key] = cond
+                entry = SingleFlightEntry()
+                self._in_flight[cache_key] = entry
                 is_leader = True
 
         if not is_leader:
-            # Wait for leader thread to finish generation
-            with self._single_flight_lock:
-                while cache_key in self._in_flight:
-                    cond.wait(timeout=10.0)
-
+            # Wait for leader thread to complete generation
+            entry.event.wait()
+            if entry.exception is not None:
+                raise entry.exception
+            if entry.result is not None:
+                return cache_key, entry.result
             hit = self.get(cache_key)
             if hit is not None:
                 return cache_key, hit
-            # If generation failed or didn't populate cache, fall through to retry
-            return self.get_or_generate(attachment_id, derivative_type, generator_version, params, generator_func)
+            raise RuntimeError("Generation finished without result")
 
-        # Leader thread generates data
+        # Leader thread executes generation
         try:
             data = generator_func()
             self.put(cache_key, attachment_id, derivative_type, generator_version, params, data)
+            entry.result = data
             return cache_key, data
+        except Exception as err:
+            entry.exception = err
+            raise
         finally:
             with self._single_flight_lock:
                 self._in_flight.pop(cache_key, None)
-                cond.notify_all()
+            entry.event.set()
 
     def delete(self, cache_key: str):
         """Deletes a specific cache entry from L1, L2, and disk."""
@@ -391,12 +417,13 @@ class DerivedMediaCache:
                 conn.close()
 
     def invalidate_attachment(self, attachment_id: str):
-        """Invalidates all cached derivatives associated with attachment_id."""
+        """Invalidates all cached derivatives associated with attachment_id using opaque attachment_key."""
+        att_key = self.derive_attachment_key(attachment_id)
         with self._db_lock:
             conn = self._get_db_conn()
             try:
                 cur = conn.cursor()
-                cur.execute("SELECT cache_key FROM cache_entries WHERE attachment_id = ?;", (attachment_id,))
+                cur.execute("SELECT cache_key FROM cache_entries WHERE attachment_key = ?;", (att_key,))
                 keys = [r[0] for r in cur.fetchall()]
 
                 for k in keys:
@@ -409,7 +436,7 @@ class DerivedMediaCache:
                             pass
 
                 with conn:
-                    conn.execute("DELETE FROM cache_entries WHERE attachment_id = ?;", (attachment_id,))
+                    conn.execute("DELETE FROM cache_entries WHERE attachment_key = ?;", (att_key,))
             finally:
                 conn.close()
 

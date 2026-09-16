@@ -304,8 +304,26 @@ def test_player_server_handler(test_key):
         os.unlink(enc_path)
 
 
+def make_test_video_bytes() -> bytes:
+    import av
+    buf = io.BytesIO()
+    container = av.open(buf, mode='w', format='mp4')
+    stream = container.add_stream('h264', rate=30)
+    stream.width = 320
+    stream.height = 180
+    stream.pix_fmt = 'yuv420p'
+    for i in range(5):
+        frame = av.VideoFrame(320, 180, 'yuv420p')
+        for packet in stream.encode(frame):
+            container.mux(packet)
+    for packet in stream.encode():
+        container.mux(packet)
+    container.close()
+    return buf.getvalue()
+
+
 def test_derivative_endpoint_security_and_headers(test_key):
-    plaintext = b"Video payload for derivative endpoint test"
+    plaintext = make_test_video_bytes()
     enc_data = make_encrypted_attachment(plaintext, test_key)
 
     with tempfile.NamedTemporaryFile(delete=False) as f:
@@ -359,5 +377,24 @@ def test_derivative_endpoint_security_and_headers(test_key):
         handler = MockHTTPHandler()
         player_server._Handler._serve_derivative(handler, valid_key, unauth_qs)
         assert handler.error_code == 404
+
+        # 4. Out-of-bounds parameter formatting -> HTTP 400
+        bad_format_qs = dict(qs, fmt=['invalid_format'])
+        handler = MockHTTPHandler()
+        player_server._Handler._serve_derivative(handler, valid_key, bad_format_qs)
+        assert handler.error_code == 400
     finally:
         os.unlink(enc_path)
+
+
+def test_server_media_lookup_lru_bounds():
+    # Insert 1500 lookup entries into player_server
+    player_server._media_lookup.clear()
+    lookup_dict = {f"item_{i}": (f"path_{i}", "key", 100, "video/mp4") for i in range(1500)}
+    player_server._update_media_lookup(lookup_dict)
+
+    # Size must be strictly bounded by _LOOKUP_MAX (1000)
+    assert len(player_server._media_lookup) == player_server._LOOKUP_MAX
+    # Oldest entries (item_0 ... item_499) must have been evicted
+    assert "item_0" not in player_server._media_lookup
+    assert "item_1499" in player_server._media_lookup

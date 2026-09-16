@@ -15,12 +15,60 @@ import subprocess
 import sys
 import threading
 import time
+from typing import Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 import webbrowser
 
-# Global state for streaming lookup & attachment root
-_media_lookup: dict = {}
+from collections import OrderedDict
+
+# Bounded global state for streaming lookup & attachment root
+_LOOKUP_MAX = 1000
+_media_lookup: OrderedDict = OrderedDict()
 _lookup_lock = threading.Lock()
+
+
+def _update_media_lookup(lookup_dict: dict):
+    """Updates bounded media lookup LRU map."""
+    with _lookup_lock:
+        for k, v in lookup_dict.items():
+            if k in _media_lookup:
+                _media_lookup.move_to_end(k)
+            _media_lookup[k] = v
+            while len(_media_lookup) > _LOOKUP_MAX:
+                _media_lookup.popitem(last=False)
+
+
+def _get_media_lookup_entry(msg_id: str) -> Optional[Tuple[str, str, int, str]]:
+    """Retrieves lookup entry from LRU map or queries database on demand."""
+    with _lookup_lock:
+        if msg_id in _media_lookup:
+            _media_lookup.move_to_end(msg_id)
+            return _media_lookup[msg_id]
+
+    # On LRU miss, query database on demand
+    try:
+        from db.queries import _db_lock, _db_cur
+        with _db_lock:
+            if not _db_cur:
+                return None
+            _db_cur.execute("""
+                SELECT ma.path, ma.localKey, ma.size, ma.contentType
+                FROM message_attachments ma
+                WHERE ma.path = ? OR ma.messageId = ?
+                LIMIT 1;
+            """, (msg_id, msg_id))
+            row = _db_cur.fetchone()
+            if row:
+                path, local_key, size, content_type = row[0], row[1], row[2] or 0, row[3] or "video/mp4"
+                entry = (path, local_key, size, content_type)
+                with _lookup_lock:
+                    _media_lookup[msg_id] = entry
+                    while len(_media_lookup) > _LOOKUP_MAX:
+                        _media_lookup.popitem(last=False)
+                return entry
+    except Exception:
+        pass
+    return None
 _attach_root = ""
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
@@ -386,8 +434,7 @@ class _Handler(BaseHTTPRequestHandler):
             )
             elapsed = time.time() - t0
             print(f"[API] _serve_media query returned {len(page_res.get('items', []))} items in {elapsed:.3f}s", flush=True)
-            with _lookup_lock:
-                _media_lookup.update(lookup)
+            _update_media_lookup(lookup)
             self._json(page_res)
         except ValueError as e:
             self.send_error(400, f"Bad request: {e}")
@@ -435,11 +482,9 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_error(400, "Missing media id parameter")
             return
 
-        with _lookup_lock:
-            entry = _media_lookup.get(media_id)
-
+        entry = _get_media_lookup_entry(media_id)
         if not entry:
-            self.send_error(404, "Media not found — load its group first")
+            self.send_error(404, "Media not found")
             return
 
         deriv_type = qs.get('type', ['poster'])[0]
@@ -448,16 +493,19 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            width = int(qs.get('w', ['320'])[0])
-            height = int(qs.get('h', ['180'])[0])
-            frames = int(qs.get('frames', ['5'])[0])
-            version = int(qs.get('v', ['1'])[0])
-            quality = int(qs.get('q', ['80'])[0])
+            width = max(16, min(1920, int(qs.get('w', ['320'])[0])))
+            height = max(16, min(1080, int(qs.get('h', ['180'])[0])))
+            frames = max(1, min(20, int(qs.get('frames', ['5'])[0])))
+            version = max(1, min(100, int(qs.get('v', ['1'])[0])))
+            quality = max(1, min(100, int(qs.get('q', ['80'])[0])))
         except (ValueError, TypeError):
-            self.send_error(400, "Invalid parameter type")
+            self.send_error(400, "Invalid parameter type or range")
             return
 
-        fmt = qs.get('fmt', ['webp'])[0]
+        fmt = str(qs.get('fmt', ['webp'])[0]).lower()
+        if fmt not in ('webp', 'jpeg', 'png'):
+            self.send_error(400, "Unsupported image format")
+            return
 
         params = {
             'width': width,
@@ -517,11 +565,10 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_error(500, f"Failed to generate derivative: {e}")
 
     def _stream(self, msg_id: str):
-        with _lookup_lock:
-            entry = _media_lookup.get(msg_id)
+        entry = _get_media_lookup_entry(msg_id)
         if not entry:
             sys.stderr.write(f"[Media Stream Error] Media ID not found in lookup: {msg_id}\n")
-            self.send_error(404, "Media not found — load its group first")
+            self.send_error(404, "Media not found")
             return
 
         rel_path, local_key, size, content_type = entry

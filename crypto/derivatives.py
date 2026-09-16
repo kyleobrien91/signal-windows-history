@@ -32,9 +32,11 @@ def extract_video_frames_in_memory(
         List of PIL RGB Image objects.
     """
     w, h = target_size
-    if not video_bytes or av is None:
-        placeholder = Image.new('RGB', (w, h), color=(40, 40, 40))
-        return [placeholder] * num_frames
+    if not video_bytes:
+        raise ValueError("Empty video payload bytes")
+
+    if av is None:
+        raise RuntimeError("PyAV ('av') library is required for frame extraction")
 
     try:
         container = av.open(io.BytesIO(video_bytes))
@@ -42,8 +44,7 @@ def extract_video_frames_in_memory(
 
         if not video_stream:
             container.close()
-            placeholder = Image.new('RGB', (w, h), color=(40, 40, 40))
-            return [placeholder] * num_frames
+            raise ValueError("No video stream found in container")
 
         duration_sec = 0.0
         if video_stream.duration and video_stream.time_base:
@@ -75,8 +76,7 @@ def extract_video_frames_in_memory(
         container.close()
 
         if not frames:
-            placeholder = Image.new('RGB', (w, h), color=(40, 40, 40))
-            frames = [placeholder]
+            raise ValueError("Failed to decode any valid frames from video stream")
 
         # Duplicate last frame if needed to reach num_frames
         while len(frames) < num_frames:
@@ -84,9 +84,8 @@ def extract_video_frames_in_memory(
 
         return frames[:num_frames]
 
-    except Exception:
-        placeholder = Image.new('RGB', (w, h), color=(40, 40, 40))
-        return [placeholder] * num_frames
+    except Exception as e:
+        raise ValueError(f"Video frame extraction failed: {e}")
 
 
 def generate_poster_bytes(video_bytes: bytes, params: dict) -> bytes:

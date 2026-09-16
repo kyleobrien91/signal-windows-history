@@ -169,114 +169,135 @@ def _query_media_paged(
 
         ts_expr = "COALESCE(NULLIF(ma.sentAt, 0), NULLIF(m.sent_at, 0), NULLIF(m.timestamp, 0), NULLIF(ma.receivedAt, 0), NULLIF(m.received_at, 0), 0)"
 
-        if cursor_ts is not None and cursor_rowid is not None:
-            where_conds.append(f"({ts_expr} < ? OR ({ts_expr} = ? AND ma.rowid < ?))")
-            params.extend([cursor_ts, cursor_ts, cursor_rowid])
+        filtered_media = []
+        server_lookup = {}
+        last_processed_item = None
+        has_more = False
 
-        where_clause = " AND ".join(where_conds)
+        search_q = (search or "").lower().strip()
 
-        query = f"""
-            SELECT
-                ma.path AS item_id,
-                ma.messageId,
-                DATETIME({ts_expr} / 1000, 'unixepoch', 'localtime') AS sent_time,
-                m.sourceServiceId,
-                m.source,
-                ma.contentType,
-                ma.size,
-                ma.fileName,
-                ma.path,
-                ma.localKey,
-                {ts_expr} AS sent_at_ms,
-                ma.rowid AS attachment_rowid
-            FROM message_attachments ma
-            LEFT JOIN messages m ON m.id = ma.messageId
-            WHERE {where_clause}
-            ORDER BY {ts_expr} DESC, ma.rowid DESC;
-        """
+        # Chunked SQL keyset loop to ensure SQL queries always execute with explicit LIMIT
+        chunk_ts = cursor_ts
+        chunk_rowid = cursor_rowid
+        has_filters = bool(view or search_q or label)
+        chunk_size = (limit + 1) if not has_filters else min(200, limit * 4)
 
-        _db_cur.execute(query, params)
-        rows = _db_cur.fetchall()
+        while len(filtered_media) < limit + 1:
+            loop_where = list(where_conds)
+            loop_params = list(params)
 
-    filtered_media = []
-    server_lookup = {}
-    last_processed_item = None
-    has_more = False
+            if chunk_ts is not None and chunk_rowid is not None:
+                loop_where.append(f"({ts_expr} < ? OR ({ts_expr} = ? AND ma.rowid < ?))")
+                loop_params.extend([chunk_ts, chunk_ts, chunk_rowid])
 
-    search_q = (search or "").lower().strip()
+            loop_clause = " AND ".join(loop_where)
 
-    for r in rows:
-        item_id = r[0]
-        msg_id = r[1]
-        sent_time = r[2] or ""
-        src_service_id = r[3]
-        src_source = r[4]
-        content_type = r[5] or "video/mp4"
-        size = r[6] or 0
-        filename = r[7] or ""
-        path = r[8]
-        local_key = r[9]
-        sent_at_ms = int(r[10]) if r[10] else 0
-        rowid = int(r[11]) if r[11] else 0
+            query = f"""
+                SELECT
+                    ma.path AS item_id,
+                    ma.messageId,
+                    DATETIME({ts_expr} / 1000, 'unixepoch', 'localtime') AS sent_time,
+                    m.sourceServiceId,
+                    m.source,
+                    ma.contentType,
+                    ma.size,
+                    ma.fileName,
+                    ma.path,
+                    ma.localKey,
+                    {ts_expr} AS sent_at_ms,
+                    ma.rowid AS attachment_rowid
+                FROM message_attachments ma
+                LEFT JOIN messages m ON m.id = ma.messageId
+                WHERE {loop_clause}
+                ORDER BY {ts_expr} DESC, ma.rowid DESC
+                LIMIT ?;
+            """
+            loop_params.append(chunk_size)
 
-        sender = conv_map.get(src_service_id) or conv_map.get(src_source) or 'Unknown'
-        meta = _get_meta(item_id, msg_id=msg_id, sent_at_ms=sent_at_ms)
+            _db_cur.execute(query, loop_params)
+            rows = _db_cur.fetchall()
 
-        # Apply metadata filters if specified
-        if view == 'new' and not meta["is_new"]:
-            continue
-        if view == 'favourites' and not meta["favourite"]:
-            continue
-        if view == 'label' and label and label not in meta["labels"]:
-            continue
-        if search_q:
-            matches_fn = search_q in filename.lower()
-            matches_sender = search_q in sender.lower()
-            matches_label = any(search_q in l.lower() for l in meta["labels"])
-            if not (matches_fn or matches_sender or matches_label):
-                continue
+            if not rows:
+                break
 
-        # Generate derivative URLs
-        from urllib.parse import quote
-        from crypto.cache import DerivedMediaCache
-        if not hasattr(_query_media_paged, "_global_cache"):
-            import os
-            cache_dir = os.path.join(os.environ.get("APPDATA", ""), "Signal", "derived_cache")
-            _query_media_paged._global_cache = DerivedMediaCache(cache_dir=cache_dir)
-        cache = _query_media_paged._global_cache
+            for r in rows:
+                item_id = r[0]
+                msg_id = r[1]
+                sent_time = r[2] or ""
+                src_service_id = r[3]
+                src_source = r[4]
+                content_type = r[5] or "video/mp4"
+                size = r[6] or 0
+                filename = r[7] or ""
+                path = r[8]
+                local_key = r[9]
+                sent_at_ms = int(r[10]) if r[10] else 0
+                rowid = int(r[11]) if r[11] else 0
 
-        poster_params = {'width': 320, 'height': 180, 'format': 'webp', 'quality': 80}
-        poster_key = cache.derive_cache_key(item_id, 'poster', 1, poster_params)
-        poster_url = f"/api/media/derivative/{poster_key}?id={quote(item_id)}&type=poster&w=320&h=180&v=1&fmt=webp&q=80"
+                chunk_ts = sent_at_ms
+                chunk_rowid = rowid
 
-        preview_params = {'width': 320, 'height': 180, 'frames': 5, 'format': 'webp', 'quality': 80}
-        preview_key = cache.derive_cache_key(item_id, 'preview', 1, preview_params)
-        preview_url = f"/api/media/derivative/{preview_key}?id={quote(item_id)}&type=preview&w=320&h=180&frames=5&v=1&fmt=webp&q=80"
+                sender = conv_map.get(src_service_id) or conv_map.get(src_source) or 'Unknown'
+                meta = _get_meta(item_id, msg_id=msg_id, sent_at_ms=sent_at_ms)
 
-        item = {
-            "id":           item_id,
-            "message_id":   msg_id,
-            "sent_time":    sent_time,
-            "sent_at":      sent_at_ms,
-            "sender":       sender,
-            "content_type": content_type,
-            "size":         size,
-            "filename":     filename,
-            "favourite":    meta["favourite"],
-            "labels":       meta["labels"],
-            "is_new":       meta["is_new"],
-            "poster_url":   poster_url,
-            "preview_url":  preview_url,
-            "_rowid":       rowid,
-        }
+                # Apply metadata/search filters
+                if view == 'new' and not meta["is_new"]:
+                    continue
+                if view == 'favourites' and not meta["favourite"]:
+                    continue
+                if view == 'label' and label and label not in meta["labels"]:
+                    continue
+                if search_q:
+                    matches_fn = search_q in filename.lower()
+                    matches_sender = search_q in sender.lower()
+                    matches_label = any(search_q in l.lower() for l in meta["labels"])
+                    if not (matches_fn or matches_sender or matches_label):
+                        continue
 
-        if len(filtered_media) < limit:
-            filtered_media.append(item)
-            server_lookup[item_id] = (path, local_key, size, content_type)
-            last_processed_item = item
-        else:
-            has_more = True
-            break
+                # Generate derivative URLs
+                from urllib.parse import quote
+                from crypto.cache import DerivedMediaCache
+                if not hasattr(_query_media_paged, "_global_cache"):
+                    import os
+                    cache_dir = os.path.join(os.environ.get("APPDATA", ""), "Signal", "derived_cache")
+                    _query_media_paged._global_cache = DerivedMediaCache(cache_dir=cache_dir)
+                cache = _query_media_paged._global_cache
+
+                poster_params = {'width': 320, 'height': 180, 'format': 'webp', 'quality': 80}
+                poster_key = cache.derive_cache_key(item_id, 'poster', 1, poster_params)
+                poster_url = f"/api/media/derivative/{poster_key}?id={quote(item_id)}&type=poster&w=320&h=180&v=1&fmt=webp&q=80"
+
+                preview_params = {'width': 320, 'height': 180, 'frames': 5, 'format': 'webp', 'quality': 80}
+                preview_key = cache.derive_cache_key(item_id, 'preview', 1, preview_params)
+                preview_url = f"/api/media/derivative/{preview_key}?id={quote(item_id)}&type=preview&w=320&h=180&frames=5&v=1&fmt=webp&q=80"
+
+                item = {
+                    "id":           item_id,
+                    "message_id":   msg_id,
+                    "sent_time":    sent_time,
+                    "sent_at":      sent_at_ms,
+                    "sender":       sender,
+                    "content_type": content_type,
+                    "size":         size,
+                    "filename":     filename,
+                    "favourite":    meta["favourite"],
+                    "labels":       meta["labels"],
+                    "is_new":       meta["is_new"],
+                    "poster_url":   poster_url,
+                    "preview_url":  preview_url,
+                    "_rowid":       rowid,
+                }
+
+                if len(filtered_media) < limit:
+                    filtered_media.append(item)
+                    server_lookup[item_id] = (path, local_key, size, content_type)
+                    last_processed_item = item
+                else:
+                    has_more = True
+                    break
+
+            if len(rows) < chunk_size and not has_more:
+                break
 
     next_cursor = None
     if has_more and last_processed_item:

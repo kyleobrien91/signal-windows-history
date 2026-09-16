@@ -2,34 +2,37 @@
 """
 crypto/key_provider.py - Master key provider abstraction for cache encryption.
 
-Uses Windows DPAPI on Windows platforms, and secure file-backed or explicit test key
-providers on non-Windows platforms.
+Uses Windows DPAPI on Windows platforms, and explicit test keys or ephemeral in-memory
+master keys on non-Windows platforms (failing closed for untrusted file storage).
 """
 
 import os
 import secrets
 import sys
 
+_EPHEMERAL_KEY: bytes = None
+
 
 def get_cache_master_key(key_dir: str, test_key: bytes = None) -> bytes:
     """Retrieves or generates a 32-byte master key for AES-GCM cache encryption.
 
     Args:
-        key_dir: Directory where the encrypted/stored master key resides.
-        test_key: Optional explicit 32-byte master key for testing.
+        key_dir: Directory where the DPAPI-encrypted master key resides on Windows.
+        test_key: Explicit 32-byte master key for testing / CI.
 
     Returns:
         32 bytes master key.
     """
+    global _EPHEMERAL_KEY
+
     if test_key is not None:
         if not isinstance(test_key, bytes) or len(test_key) != 32:
             raise ValueError("test_key must be exactly 32 bytes")
         return test_key
 
-    os.makedirs(key_dir, exist_ok=True)
-    key_file = os.path.join(key_dir, "cache_master.key")
-
     if sys.platform == "win32":
+        os.makedirs(key_dir, exist_ok=True)
+        key_file = os.path.join(key_dir, "cache_master.key")
         try:
             from crypto.dpapi import dpapi_decrypt, dpapi_encrypt
             if os.path.exists(key_file):
@@ -50,17 +53,7 @@ def get_cache_master_key(key_dir: str, test_key: bytes = None) -> bytes:
         except Exception as e:
             raise RuntimeError(f"Failed to initialize Windows DPAPI cache master key: {e}")
     else:
-        # Non-Windows environment (e.g. Linux CI / testing)
-        if os.path.exists(key_file):
-            try:
-                with open(key_file, "rb") as f:
-                    raw_key = f.read()
-                if len(raw_key) == 32:
-                    return raw_key
-            except Exception:
-                pass
-
-        raw_key = secrets.token_bytes(32)
-        with open(key_file, "wb") as f:
-            f.write(raw_key)
-        return raw_key
+        # Non-Windows environment (e.g. Linux CI / testing): use ephemeral in-memory key
+        if _EPHEMERAL_KEY is None:
+            _EPHEMERAL_KEY = secrets.token_bytes(32)
+        return _EPHEMERAL_KEY

@@ -214,6 +214,51 @@ class TestDerivedMediaCache(unittest.TestCase):
         # In-flight lock state for fail_key must be cleared
         self.assertNotIn(fail_key, self.cache._in_flight)
 
+    def test_sqlite_cache_index_uses_opaque_attachment_key(self):
+        att_id = "sensitive/signal/attachment_999.mp4"
+        key = self.cache.derive_cache_key(att_id, "poster", 1, {})
+        self.cache.put(key, att_id, "poster", 1, {}, b"some_data")
+
+        import sqlite3
+        conn = sqlite3.connect(self.cache.db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT cache_key, attachment_key FROM cache_entries WHERE cache_key = ?;", (key,))
+        row = cur.fetchone()
+        conn.close()
+
+        self.assertIsNotNone(row)
+        stored_att_key = row[1]
+        self.assertNotIn("sensitive", stored_att_key)
+        self.assertNotIn("signal", stored_att_key)
+        self.assertNotIn("999", stored_att_key)
+        self.assertEqual(stored_att_key, self.cache.derive_attachment_key(att_id))
+
+    def test_sqlite_db_corruption_recovery(self):
+        att_id = "att_corrupt"
+        key = self.cache.derive_cache_key(att_id, "poster", 1, {})
+        self.cache.put(key, att_id, "poster", 1, {}, b"data_before_corruption")
+
+        # Corrupt the index.db file by writing garbage
+        with open(self.cache.db_path, "wb") as f:
+            f.write(b"CORRUPT_SQLITE_GARBAGE_HEADER_DATA_12345")
+
+        # Getting item with corrupt DB must recover by resetting DB and returning None (miss)
+        self.cache._l1_delete(key)
+        hit = self.cache.get(key)
+        self.assertIsNone(hit)
+
+        # Cache should still be operational for new writes
+        self.cache.put(key, att_id, "poster", 1, {}, b"data_after_recovery")
+        self.assertEqual(self.cache.get(key), b"data_after_recovery")
+
+    def test_non_windows_key_provider_ephemeral_safety(self):
+        # Non-Windows key provider must return a 32-byte key without writing plaintext file
+        key_dir = tempfile.mkdtemp()
+        master_key = get_cache_master_key(key_dir)
+        self.assertEqual(len(master_key), 32)
+        plaintext_key_file = os.path.join(key_dir, "cache_master.key")
+        self.assertFalse(os.path.exists(plaintext_key_file))
+
 
 if __name__ == "__main__":
     unittest.main()
