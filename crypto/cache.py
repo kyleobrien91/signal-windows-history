@@ -26,27 +26,28 @@ from crypto.key_provider import get_cache_master_key
 
 
 def encode_media_token(master_key: bytes, attachment_id: str, size: int = 0) -> str:
-    """Encodes attachment_id and size into an opaque HMAC-authenticated Base64 string."""
+    """Encrypts attachment_id and size into an AES-GCM encrypted, opaque Base64 URL-safe token."""
     payload = json.dumps({"id": attachment_id, "sz": int(size)}, separators=(',', ':')).encode('utf-8')
-    sig = hmac.new(master_key, payload, hashlib.sha256).digest()
-    p_b64 = base64.urlsafe_b64encode(payload).decode('ascii').rstrip('=')
-    s_b64 = base64.urlsafe_b64encode(sig).decode('ascii').rstrip('=')
-    return f"{p_b64}.{s_b64}"
+    nonce = os.urandom(12)
+    aesgcm = AESGCM(master_key)
+    ciphertext = aesgcm.encrypt(nonce, payload, b"media_token")
+    raw = nonce + ciphertext
+    return base64.urlsafe_b64encode(raw).decode('ascii').rstrip('=')
 
 
 def decode_media_token(master_key: bytes, token_str: str) -> Tuple[str, int]:
-    """Decodes and validates an opaque media token into (attachment_id, size)."""
-    if not token_str or "." not in token_str:
-        raise ValueError("Empty or malformed media token")
+    """Decrypts and authenticates an opaque AES-GCM media token into (attachment_id, size)."""
+    if not token_str:
+        raise ValueError("Empty media token")
     try:
-        p_b64, s_b64 = token_str.split(".", 1)
-        p_b64 += "=" * ((4 - len(p_b64) % 4) % 4)
-        s_b64 += "=" * ((4 - len(s_b64) % 4) % 4)
-        payload = base64.urlsafe_b64decode(p_b64.encode('ascii'))
-        sig = base64.urlsafe_b64decode(s_b64.encode('ascii'))
-        expected_sig = hmac.new(master_key, payload, hashlib.sha256).digest()
-        if not hmac.compare_digest(sig, expected_sig):
-            raise ValueError("Media token HMAC signature verification failed")
+        padded_b64 = token_str + "=" * ((4 - len(token_str) % 4) % 4)
+        raw = base64.urlsafe_b64decode(padded_b64.encode('ascii'))
+        if len(raw) < 28:
+            raise ValueError("Media token payload too short")
+        nonce = raw[:12]
+        ciphertext = raw[12:]
+        aesgcm = AESGCM(master_key)
+        payload = aesgcm.decrypt(nonce, ciphertext, b"media_token")
         data = json.loads(payload.decode('utf-8'))
         return str(data["id"]), int(data.get("sz", 0))
     except Exception as e:
@@ -130,6 +131,11 @@ class DerivedMediaCache:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_attachment ON cache_entries(attachment_key);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_lru ON cache_entries(last_accessed_at);")
 
+    def _is_corrupt_error(self, err: Exception) -> bool:
+        """Returns True if exception indicates actual database image corruption."""
+        msg = str(err).lower()
+        return any(term in msg for term in ("corrupt", "malformed", "not a database", "file is not a database"))
+
     def _get_db_conn(self) -> sqlite3.Connection:
         """Returns SQLite connection to index DB, resetting database schema ONLY on actual corruption."""
         try:
@@ -144,12 +150,14 @@ class DerivedMediaCache:
                 raise sqlite3.DatabaseError(f"Integrity check failed: {res[0]}")
             self._ensure_schema(conn)
             return conn
-        except sqlite3.DatabaseError:
-            self._reset_db()
-            conn = sqlite3.connect(self.db_path, timeout=10.0)
-            conn.execute("PRAGMA journal_mode = WAL;")
-            self._ensure_schema(conn)
-            return conn
+        except sqlite3.DatabaseError as e:
+            if self._is_corrupt_error(e):
+                self._reset_db()
+                conn = sqlite3.connect(self.db_path, timeout=10.0)
+                conn.execute("PRAGMA journal_mode = WAL;")
+                self._ensure_schema(conn)
+                return conn
+            raise
 
     def _init_db(self):
         """Initializes SQLite cache index schema."""
@@ -158,6 +166,15 @@ class DerivedMediaCache:
             conn.close()
 
     # ── Key Derivation & Cryptography ─────────────────────────────────
+
+    def encode_media_token(self, attachment_id: str, size: int = 0) -> str:
+        """Encodes attachment_id into an opaque AES-GCM media token."""
+        return encode_media_token(self._master_key, attachment_id, size)
+
+    def decode_media_token(self, token_str: str, master_key: Optional[bytes] = None) -> Tuple[str, int]:
+        """Decodes an opaque AES-GCM media token."""
+        key = master_key if master_key is not None else self._master_key
+        return decode_media_token(key, token_str)
 
     def derive_attachment_key(self, attachment_id: str) -> str:
         """Derives an opaque HMAC key for attachment indexing and invalidation."""
@@ -314,8 +331,9 @@ class DerivedMediaCache:
                     conn.commit()
                 finally:
                     conn.close()
-            except sqlite3.Error:
-                self._reset_db()
+            except sqlite3.Error as e:
+                if self._is_corrupt_error(e):
+                    self._reset_db()
                 return None
 
         # Store in L1 RAM cache and return
@@ -513,8 +531,9 @@ class DerivedMediaCache:
                                 conn.execute("DELETE FROM cache_entries WHERE cache_key = ?;", (sk,))
                 finally:
                     conn.close()
-            except sqlite3.Error:
-                self._reset_db()
+            except sqlite3.Error as e:
+                if self._is_corrupt_error(e):
+                    self._reset_db()
 
     def clear(self):
         """Clears all L1 and L2 cache entries."""

@@ -46,6 +46,14 @@ let nextCursor    = null;  // Keyset cursor token for progressive pagination
 let hasMore       = false;
 let isLoadingMore = false;
 let lastPendingCount = -1;
+let searchTimer = null;
+
+function handleSearchInput() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    loadMediaPage(true);
+  }, 300);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Label & Utility Helpers
@@ -358,7 +366,7 @@ function showLoadMoreSpinner(loading) {
 function updateLoadMoreButton() {
   const wrap = $('load-more-wrap');
   if (wrap) {
-    wrap.style.display = (hasMore && filtered.length > 0) ? 'block' : 'none';
+    wrap.style.display = hasMore ? 'block' : 'none';
   }
 }
 
@@ -682,30 +690,18 @@ function refreshCard(idx, m) {
 }
 
 async function markAllSeen() {
-  const newItems = allMedia.filter(m => m.is_new);
-  if (!newItems.length) return;
-  const ids = newItems.map(m => m.id);
-
-  newItems.forEach(m => { m.is_new = false; });
-  filtered.forEach(m => { if (ids.includes(m.id)) m.is_new = false; });
-
   try {
-    await fetch('/api/meta/seen', {
+    const res = await fetch('/api/meta/mark_all_seen', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids })
     });
+    log('Seen', `markAllSeen POST response: HTTP ${res.status}`);
   } catch (err) {
     logErr('Seen', 'markAllSeen POST failed:', err);
   }
 
   await updateNewCount();
-
-  if (currentView && currentView.type === 'new') {
-    renderGrid(true);
-  } else {
-    applyFilter();
-  }
+  await loadMediaPage(true);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

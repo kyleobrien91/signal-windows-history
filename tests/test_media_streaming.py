@@ -345,7 +345,7 @@ def test_derivative_endpoint_security_and_headers(test_key):
         cache = DerivedMediaCache(cache_dir=tmp_cache_dir)
         player_server._Handler._global_cache = cache
 
-        poster_params = {'width': 320, 'height': 180, 'format': 'webp', 'quality': 80, 'size': len(plaintext)}
+        poster_params = {'width': 320, 'height': 180, 'format': 'webp', 'quality': 80, 'size': len(plaintext), 'src_key': test_key}
         valid_key = cache.derive_cache_key(msg_id, 'poster', 1, poster_params)
         token = encode_media_token(cache._master_key, msg_id, len(plaintext))
 

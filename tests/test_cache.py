@@ -259,6 +259,44 @@ class TestDerivedMediaCache(unittest.TestCase):
         plaintext_key_file = os.path.join(key_dir, "cache_master.key")
         self.assertFalse(os.path.exists(plaintext_key_file))
 
+    def test_media_token_aes_gcm_opacity(self):
+        att_id = "sensitive/path/to/signal_media.mp4"
+        token = self.cache.encode_media_token(att_id, 1024)
+
+        # Token must NOT contain raw attachment path in plain text
+        self.assertNotIn("sensitive", token)
+        self.assertNotIn("signal_media", token)
+
+        # Decoding token with correct master key succeeds
+        decoded_id, decoded_sz = self.cache.decode_media_token(token)
+        self.assertEqual(decoded_id, att_id)
+        self.assertEqual(decoded_sz, 1024)
+
+        # Decoding token with wrong master key fails
+        wrong_key = secrets.token_bytes(32)
+        with self.assertRaises(ValueError):
+            self.cache.decode_media_token(token, master_key=wrong_key)
+
+    def test_content_key_change_invalidates_cache(self):
+        att_id = "att_content_change"
+        params_v1 = {'width': 320, 'height': 180, 'format': 'webp', 'quality': 80, 'size': 1024, 'src_key': 'key_v1'}
+        params_v2 = {'width': 320, 'height': 180, 'format': 'webp', 'quality': 80, 'size': 1024, 'src_key': 'key_v2'}
+
+        key1 = self.cache.derive_cache_key(att_id, "poster", 1, params_v1)
+        key2 = self.cache.derive_cache_key(att_id, "poster", 1, params_v2)
+
+        # Changing src_key must result in different derived cache key
+        self.assertNotEqual(key1, key2)
+
+    def test_operational_error_does_not_reset_db(self):
+        import sqlite3
+        # OperationalError (e.g. database is locked) must NOT trigger _reset_db
+        err = sqlite3.OperationalError("database is locked")
+        self.assertFalse(self.cache._is_corrupt_error(err))
+
+        corrupt_err = sqlite3.DatabaseError("database disk image is malformed")
+        self.assertTrue(self.cache._is_corrupt_error(corrupt_err))
+
 
 if __name__ == "__main__":
     unittest.main()

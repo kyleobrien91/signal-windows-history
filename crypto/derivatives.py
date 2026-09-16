@@ -20,6 +20,7 @@ def extract_video_frames_in_memory(
     video_bytes: bytes,
     num_frames: int = 5,
     target_size: Tuple[int, int] = (320, 180),
+    attachment_id: str = None,
 ) -> List[Image.Image]:
     """Extracts uniformly spaced keyframes from video_bytes in memory.
 
@@ -49,6 +50,13 @@ def extract_video_frames_in_memory(
         duration_sec = 0.0
         if video_stream.duration and video_stream.time_base:
             duration_sec = float(video_stream.duration * video_stream.time_base)
+
+        if attachment_id and duration_sec > 0:
+            try:
+                from metadata import _set_meta
+                _set_meta(attachment_id, duration=duration_sec)
+            except Exception:
+                pass
 
         frames: List[Image.Image] = []
 
@@ -88,7 +96,7 @@ def extract_video_frames_in_memory(
         raise ValueError(f"Video frame extraction failed: {e}")
 
 
-def generate_poster_bytes(video_bytes: bytes, params: dict) -> bytes:
+def generate_poster_bytes(video_bytes: bytes, params: dict, attachment_id: str = None) -> bytes:
     """Generates a single poster thumbnail image byte payload in RAM.
 
     Params:
@@ -105,7 +113,7 @@ def generate_poster_bytes(video_bytes: bytes, params: dict) -> bytes:
     if fmt not in ('WEBP', 'JPEG', 'PNG'):
         fmt = 'WEBP'
 
-    frames = extract_video_frames_in_memory(video_bytes, num_frames=1, target_size=(w, h))
+    frames = extract_video_frames_in_memory(video_bytes, num_frames=1, target_size=(w, h), attachment_id=attachment_id)
     poster = frames[0]
 
     buf = io.BytesIO()
@@ -116,7 +124,7 @@ def generate_poster_bytes(video_bytes: bytes, params: dict) -> bytes:
     return buf.getvalue()
 
 
-def generate_preview_sprite_bytes(video_bytes: bytes, params: dict) -> bytes:
+def generate_preview_sprite_bytes(video_bytes: bytes, params: dict, attachment_id: str = None) -> bytes:
     """Generates a composite horizontal sprite sheet image payload in RAM.
 
     Params:
@@ -135,7 +143,7 @@ def generate_preview_sprite_bytes(video_bytes: bytes, params: dict) -> bytes:
     if fmt not in ('WEBP', 'JPEG', 'PNG'):
         fmt = 'WEBP'
 
-    extracted = extract_video_frames_in_memory(video_bytes, num_frames=num_frames, target_size=(w, h))
+    extracted = extract_video_frames_in_memory(video_bytes, num_frames=num_frames, target_size=(w, h), attachment_id=attachment_id)
 
     # Create composite horizontal sprite image (width = w * num_frames, height = h)
     sprite = Image.new('RGB', (w * num_frames, h))

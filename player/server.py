@@ -370,7 +370,9 @@ class _Handler(BaseHTTPRequestHandler):
         path   = parsed.path
         print(f"[HTTP] Incoming POST: {self.path}", flush=True)
 
-        if path == '/api/meta/seen':
+        if path == '/api/meta/mark_all_seen':
+            self._handle_mark_all_seen()
+        elif path == '/api/meta/seen':
             self._handle_mark_seen()
         elif path.startswith('/api/meta/'):
             self._update_meta(unquote(path[len('/api/meta/'):]))
@@ -443,6 +445,39 @@ class _Handler(BaseHTTPRequestHandler):
             print(f"[API ERROR] _serve_media failed after {elapsed:.3f}s: {e}", flush=True)
             import traceback
             traceback.print_exc()
+            self.send_error(500, str(e))
+
+    def _handle_mark_all_seen(self):
+        try:
+            from metadata.store import _meta_data, _meta_lock, _mark_seen
+            with _meta_lock:
+                last_ts = _meta_data.get("last_session_timestamp", 0)
+
+            all_unseen_ids = []
+            if last_ts > 0:
+                from db.queries import _db_lock, _db_cur
+                with _db_lock:
+                    if _db_cur:
+                        _db_cur.execute("""
+                            SELECT ma.path, ma.messageId
+                            FROM message_attachments ma
+                            WHERE ma.contentType LIKE 'video/%'
+                              AND ma.path IS NOT NULL
+                              AND ma.localKey IS NOT NULL
+                              AND ma.sentAt > ?;
+                        """, (last_ts,))
+                        rows = _db_cur.fetchall()
+                        for p, m in rows:
+                            if p:
+                                all_unseen_ids.append(p)
+                            if m:
+                                all_unseen_ids.append(m)
+
+            if all_unseen_ids:
+                _mark_seen(all_unseen_ids)
+
+            self._json({"status": "ok", "marked": len(all_unseen_ids)})
+        except Exception as e:
             self.send_error(500, str(e))
 
     def _handle_mark_seen(self):
@@ -532,6 +567,7 @@ class _Handler(BaseHTTPRequestHandler):
             'format': fmt,
             'quality': quality,
             'size': size,
+            'src_key': local_key,
         }
         if deriv_type == 'preview':
             params['frames'] = frames
@@ -551,9 +587,9 @@ class _Handler(BaseHTTPRequestHandler):
 
             from crypto.derivatives import generate_poster_bytes, generate_preview_sprite_bytes
             if deriv_type == 'poster':
-                return generate_poster_bytes(video_bytes, params)
+                return generate_poster_bytes(video_bytes, params, attachment_id=media_id)
             else:
-                return generate_preview_sprite_bytes(video_bytes, params)
+                return generate_preview_sprite_bytes(video_bytes, params, attachment_id=media_id)
 
         try:
             _, image_bytes = cache.get_or_generate(
