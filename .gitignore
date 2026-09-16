@@ -22,6 +22,8 @@ signal-work/
 
 # Media exports & caches (never commit decrypted media!)
 exported_media/
+derived_cache/
+Signal/
 *.mp4
 *.mkv
 *.webm

@@ -302,3 +302,62 @@ def test_player_server_handler(test_key):
         assert srv_handler.wfile.getvalue() == plaintext
     finally:
         os.unlink(enc_path)
+
+
+def test_derivative_endpoint_security_and_headers(test_key):
+    plaintext = b"Video payload for derivative endpoint test"
+    enc_data = make_encrypted_attachment(plaintext, test_key)
+
+    with tempfile.NamedTemporaryFile(delete=False) as f:
+        f.write(enc_data)
+        enc_path = f.name
+
+    try:
+        msg_id = "test_deriv_msg_456"
+        media_entry = (enc_path, test_key, len(plaintext), "video/mp4")
+
+        with player_server._lookup_lock:
+            player_server._media_lookup[msg_id] = media_entry
+
+        player_server._attach_root = ""
+
+        # Initialize cache
+        from crypto.cache import DerivedMediaCache
+        tmp_cache_dir = tempfile.mkdtemp()
+        cache = DerivedMediaCache(cache_dir=tmp_cache_dir)
+        player_server._Handler._global_cache = cache
+
+        poster_params = {'width': 320, 'height': 180, 'format': 'webp', 'quality': 80}
+        valid_key = cache.derive_cache_key(msg_id, 'poster', 1, poster_params)
+
+        # 1. Valid derivative request
+        qs = {
+            'id': [msg_id],
+            'type': ['poster'],
+            'w': ['320'],
+            'h': ['180'],
+            'v': ['1'],
+            'fmt': ['webp'],
+            'q': ['80'],
+        }
+        handler = MockHTTPHandler()
+        player_server._Handler._serve_derivative(handler, valid_key, qs)
+
+        assert handler.response_code == 200
+        assert handler.response_headers["Content-Type"] == "image/webp"
+        assert handler.response_headers["Cache-Control"] == "private, no-store, no-cache, must-revalidate"
+        assert len(handler.wfile.getvalue()) > 0
+
+        # 2. Key mismatch request -> 400 Bad Request
+        bad_qs = dict(qs, w=['640'])  # Width mismatch
+        handler = MockHTTPHandler()
+        player_server._Handler._serve_derivative(handler, valid_key, bad_qs)
+        assert handler.error_code == 400
+
+        # 3. Missing/Unauthorized media_id -> 404 Not Found
+        unauth_qs = dict(qs, id=['unauthorized_msg'])
+        handler = MockHTTPHandler()
+        player_server._Handler._serve_derivative(handler, valid_key, unauth_qs)
+        assert handler.error_code == 404
+    finally:
+        os.unlink(enc_path)

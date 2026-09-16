@@ -22,7 +22,7 @@ import webbrowser
 _media_lookup: dict = {}
 _lookup_lock = threading.Lock()
 _attach_root = ""
-WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 
 
 # ---------------------------------------------------------------------------
@@ -281,8 +281,23 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(groups)
         elif path == '/api/media':
             group_arg = qs.get('group', [None])[0]
-            print(f"[API] Handling /api/media for group={group_arg}", flush=True)
-            self._serve_media(group_arg)
+            limit_arg = qs.get('limit', ['50'])[0]
+            cursor_arg = qs.get('cursor', [None])[0]
+            view_arg = qs.get('view', [None])[0]
+            label_arg = qs.get('label', [None])[0]
+            search_arg = qs.get('search', [None])[0]
+            print(f"[API] Handling /api/media for group={group_arg}, limit={limit_arg}, cursor={cursor_arg}", flush=True)
+            self._serve_media(
+                group_id=group_arg,
+                limit=limit_arg,
+                cursor=cursor_arg,
+                view=view_arg,
+                label=label_arg,
+                search=search_arg,
+            )
+        elif path.startswith('/api/media/derivative/'):
+            cache_key = unquote(path[len('/api/media/derivative/'):])
+            self._serve_derivative(cache_key, qs)
         elif path == '/api/media/new_count':
             from db import _query_new_count
             count = _query_new_count()
@@ -346,19 +361,36 @@ class _Handler(BaseHTTPRequestHandler):
 
     # ── Routes ───────────────────────────────────────────────────────────────
 
-    def _serve_media(self, group_id: str):
+    def _serve_media(
+        self,
+        group_id: str = 'all',
+        limit: str = '50',
+        cursor: str = None,
+        view: str = None,
+        label: str = None,
+        search: str = None,
+    ):
         if not group_id:
             group_id = 'all'
         t0 = time.time()
         print(f"[API] _serve_media starting query for group_id='{group_id}'...", flush=True)
         try:
-            from db import _query_media
-            media, lookup = _query_media(group_id)
+            from db.queries import query_media_paged
+            page_res, lookup = query_media_paged(
+                group_id=group_id,
+                limit=limit,
+                cursor=cursor,
+                view=view,
+                label=label,
+                search=search,
+            )
             elapsed = time.time() - t0
-            print(f"[API] _serve_media query returned {len(media)} items in {elapsed:.3f}s", flush=True)
+            print(f"[API] _serve_media query returned {len(page_res.get('items', []))} items in {elapsed:.3f}s", flush=True)
             with _lookup_lock:
                 _media_lookup.update(lookup)
-            self._json(media)
+            self._json(page_res)
+        except ValueError as e:
+            self.send_error(400, f"Bad request: {e}")
         except Exception as e:
             elapsed = time.time() - t0
             print(f"[API ERROR] _serve_media failed after {elapsed:.3f}s: {e}", flush=True)
@@ -396,6 +428,93 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(entry)
         except Exception as e:
             self.send_error(500, str(e))
+
+    def _serve_derivative(self, cache_key: str, qs: dict):
+        media_id = qs.get('id', [None])[0]
+        if not media_id:
+            self.send_error(400, "Missing media id parameter")
+            return
+
+        with _lookup_lock:
+            entry = _media_lookup.get(media_id)
+
+        if not entry:
+            self.send_error(404, "Media not found — load its group first")
+            return
+
+        deriv_type = qs.get('type', ['poster'])[0]
+        if deriv_type not in ('poster', 'preview'):
+            self.send_error(400, "Invalid derivative type")
+            return
+
+        try:
+            width = int(qs.get('w', ['320'])[0])
+            height = int(qs.get('h', ['180'])[0])
+            frames = int(qs.get('frames', ['5'])[0])
+            version = int(qs.get('v', ['1'])[0])
+            quality = int(qs.get('q', ['80'])[0])
+        except (ValueError, TypeError):
+            self.send_error(400, "Invalid parameter type")
+            return
+
+        fmt = qs.get('fmt', ['webp'])[0]
+
+        params = {
+            'width': width,
+            'height': height,
+            'format': fmt,
+            'quality': quality,
+        }
+        if deriv_type == 'preview':
+            params['frames'] = frames
+
+        from crypto.cache import DerivedMediaCache
+        if not hasattr(_Handler, "_global_cache"):
+            cache_dir = os.path.join(os.environ.get("APPDATA", ""), "Signal", "derived_cache")
+            _Handler._global_cache = DerivedMediaCache(cache_dir=cache_dir)
+        cache = _Handler._global_cache
+
+        expected_key = cache.derive_cache_key(media_id, deriv_type, version, params)
+        if expected_key != cache_key:
+            self.send_error(400, "Cache key mismatch for specified parameters")
+            return
+
+        rel_path, local_key, size, content_type = entry
+        enc_path = os.path.join(_attach_root, rel_path)
+
+        def _generate():
+            from crypto.attachment import decrypt_attachment
+            if not os.path.exists(enc_path):
+                raise FileNotFoundError(f"Attachment file missing: {rel_path}")
+            with open(enc_path, "rb") as f:
+                enc_data = f.read()
+            video_bytes = decrypt_attachment(enc_data, local_key, size)
+
+            from crypto.derivatives import generate_poster_bytes, generate_preview_sprite_bytes
+            if deriv_type == 'poster':
+                return generate_poster_bytes(video_bytes, params)
+            else:
+                return generate_preview_sprite_bytes(video_bytes, params)
+
+        try:
+            _, image_bytes = cache.get_or_generate(
+                attachment_id=media_id,
+                derivative_type=deriv_type,
+                generator_version=version,
+                params=params,
+                generator_func=_generate,
+            )
+
+            mime_type = "image/webp" if fmt == "webp" else ("image/jpeg" if fmt == "jpeg" else "image/png")
+            self.send_response(200)
+            self.send_header("Content-Type", mime_type)
+            self.send_header("Content-Length", str(len(image_bytes)))
+            self.send_header("Cache-Control", "private, no-store, no-cache, must-revalidate")
+            self.end_headers()
+            self.wfile.write(image_bytes)
+        except Exception as e:
+            sys.stderr.write(f"[Derivative Error] Failed to serve derivative for {media_id}: {e}\n")
+            self.send_error(500, f"Failed to generate derivative: {e}")
 
     def _stream(self, msg_id: str):
         with _lookup_lock:
